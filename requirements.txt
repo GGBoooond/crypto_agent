@@ -1,0 +1,38 @@
+# Crypto Agent - 依赖包
+# Python 3.10+
+
+# 交易所接口
+ccxt>=4.0.0
+
+# 异步支持
+aiohttp>=3.9.0
+asyncio-throttle>=1.0.0
+
+# Web框架
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+websockets>=12.0
+
+# AI接口
+openai>=1.12.0
+
+# 数据处理
+pandas>=2.1.0
+numpy>=1.26.0
+
+# 技术指标
+pandas-ta>=0.3.14b
+
+# 配置管理
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# 日志
+loguru>=0.7.0
+
+# 定时任务
+apscheduler>=3.10.0
+
+# 工具库
+python-dateutil>=2.8.0

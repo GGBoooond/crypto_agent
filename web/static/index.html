@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Agent - 量化交易监控</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background: #0f172a; color: #e2e8f0; font-family: system-ui; }
+        .card { background: #1e293b; border-radius: 8px; padding: 12px; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .status-running { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+        .status-stopped { background: #ef4444; }
+        .pnl-pos { color: #22c55e; }
+        .pnl-neg { color: #ef4444; }
+        .log { font-family: monospace; font-size: 11px; padding: 2px 4px; margin: 1px 0; border-radius: 2px; }
+        .log-INFO { background: rgba(59,130,246,0.15); border-left: 2px solid #3b82f6; }
+        .log-WARNING { background: rgba(234,179,8,0.15); border-left: 2px solid #eab308; }
+        .log-ERROR { background: rgba(239,68,68,0.15); border-left: 2px solid #ef4444; }
+        .log-DEBUG { background: rgba(100,116,139,0.1); border-left: 2px solid #64748b; }
+        .btn { padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; border: none; }
+        .btn-green { background: #22c55e; color: white; }
+        .btn-red { background: #ef4444; color: white; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 2px; }
+    </style>
+</head>
+<body class="p-4">
+    <div class="max-w-6xl mx-auto">
+        <!-- Header -->
+        <div class="flex justify-between items-center mb-4">
+            <div>
+                <h1 class="text-xl font-bold">🤖 Crypto Agent</h1>
+                <span id="symbol" class="text-sm text-gray-400">DOGE/USDT</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <div id="status" class="flex items-center gap-2 text-sm">
+                    <span class="status-dot status-stopped"></span>
+                    <span>离线</span>
+                </div>
+                <button onclick="control('enable_trading')" class="btn btn-green">✓ 启用</button>
+                <button onclick="control('disable_trading')" class="btn btn-red">✕ 停止</button>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="grid grid-cols-6 gap-2 mb-4 text-sm">
+            <div class="card"><div class="text-gray-400">余额</div><div id="balance" class="text-lg font-bold">$0</div></div>
+            <div class="card"><div class="text-gray-400">今日盈亏</div><div id="daily-pnl" class="text-lg font-bold">$0</div></div>
+            <div class="card"><div class="text-gray-400">累计盈亏</div><div id="total-pnl" class="text-lg font-bold">$0</div></div>
+            <div class="card"><div class="text-gray-400">胜率</div><div id="win-rate" class="text-lg font-bold">0%</div></div>
+            <div class="card"><div class="text-gray-400">交易数</div><div id="trades-count" class="text-lg font-bold">0</div></div>
+            <div class="card"><div class="text-gray-400">当前价</div><div id="price" class="text-lg font-bold text-blue-400">$0</div></div>
+        </div>
+
+        <!-- Main -->
+        <div class="grid grid-cols-3 gap-4">
+            <!-- Left -->
+            <div class="col-span-2 space-y-4">
+                <div class="card">
+                    <div class="text-sm font-semibold mb-2">📊 价格走势</div>
+                    <div style="height:200px"><canvas id="chart"></canvas></div>
+                </div>
+                <div class="card">
+                    <div class="text-sm font-semibold mb-2">📦 持仓</div>
+                    <div id="position" class="text-sm text-gray-400">暂无持仓</div>
+                </div>
+                <div class="card">
+                    <div class="text-sm font-semibold mb-2">📝 交易记录</div>
+                    <div id="trades" class="text-xs max-h-32 overflow-y-auto text-gray-400">暂无</div>
+                </div>
+            </div>
+            <!-- Right -->
+            <div class="space-y-4">
+                <div class="card">
+                    <div class="text-sm font-semibold mb-2">🔧 Agent状态</div>
+                    <div id="agents" class="text-xs space-y-1"></div>
+                </div>
+                <div class="card">
+                    <div class="text-sm font-semibold mb-2">🧠 AI 思考过程</div>
+                    <div id="ai-events" class="text-xs max-h-60 overflow-y-auto space-y-2 text-gray-400">等待触发...</div>
+                </div>
+                <div class="card">
+                    <div class="text-sm font-semibold mb-2">📡 最新信号</div>
+                    <div id="signals" class="text-xs max-h-28 overflow-y-auto text-gray-400">等待...</div>
+                </div>
+                <div class="card">
+                    <div class="text-sm font-semibold mb-2">📋 日志</div>
+                    <div id="logs" class="max-h-48 overflow-y-auto text-gray-400">连接中...</div>
+                </div>
+            </div>
+        </div>
+        <div class="mt-2 text-center text-xs text-gray-500">
+            <span id="conn">🔴 未连接</span> | <span id="uptime">0s</span>
+        </div>
+    </div>
+
+    <script>
+        let ws, chart, start = Date.now(), lastPrice = 0;
+
+        function initChart() {
+            chart = new Chart(document.getElementById('chart'), {
+                type: 'line',
+                data: { labels: [], datasets: [{ data: [], borderColor: '#f59e0b', fill: false, tension: 0.2, pointRadius: 0 }] },
+                options: { 
+                    responsive: true, maintainAspectRatio: false, animation: false,
+                    plugins: { legend: { display: false } },
+                    scales: { x: { display: false }, y: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#334155' } } }
+                }
+            });
+        }
+
+        function updateUI(d) {
+            document.getElementById('balance').textContent = '$' + (d.balance?.USDT || 0).toFixed(2);
+            
+            const dp = d.daily_pnl || 0;
+            const dpe = document.getElementById('daily-pnl');
+            dpe.textContent = (dp >= 0 ? '+' : '') + '$' + dp.toFixed(2);
+            dpe.className = 'text-lg font-bold ' + (dp >= 0 ? 'pnl-pos' : 'pnl-neg');
+            
+            const tp = d.stats?.total_pnl || 0;
+            const tpe = document.getElementById('total-pnl');
+            tpe.textContent = (tp >= 0 ? '+' : '') + '$' + tp.toFixed(2);
+            tpe.className = 'text-lg font-bold ' + (tp >= 0 ? 'pnl-pos' : 'pnl-neg');
+            
+            document.getElementById('win-rate').textContent = ((d.stats?.win_rate || 0) * 100).toFixed(1) + '%';
+            document.getElementById('trades-count').textContent = d.stats?.total_trades || 0;
+            
+            const st = document.getElementById('status');
+            const status = d.system_status || 'stopped';
+            st.innerHTML = `<span class="status-dot status-${status === 'running' ? 'running' : 'stopped'}"></span><span>${status === 'running' ? '运行中' : '停止'}</span>`;
+            
+            // Agents
+            const agents = ['MarketAgent', 'StrategyAgent', 'RiskAgent', 'ExecutorAgent'];
+            document.getElementById('agents').innerHTML = agents.map(a => 
+                `<div class="flex justify-between"><span>${a.replace('Agent','')}</span><span class="status-dot status-${(d.agent_status?.[a] || 'stopped') === 'running' ? 'running' : 'stopped'}"></span></div>`
+            ).join('');
+
+            // AI Events
+            const aiEvents = d.recent_ai_events || [];
+            const aiEl = document.getElementById('ai-events');
+            if (aiEvents.length) {
+                aiEl.innerHTML = aiEvents.slice().reverse().slice(0, 10).map(e => {
+                    const time = new Date(e.timestamp).toLocaleTimeString();
+                    if (e.type === 'trigger') {
+                         return `<div class="bg-indigo-900/30 p-2 rounded border-l-2 border-indigo-500">
+                            <div class="flex justify-between"><span class="text-indigo-300 font-bold">⚡ ${e.trigger.split(' ')[0]}</span> <span class="text-gray-500">${time}</span></div>
+                            <div class="mt-1 text-gray-400 text-[10px]">${e.trigger}</div>
+                            <div class="mt-1 text-indigo-400 animate-pulse">🤖 AI 分析中...</div>
+                         </div>`;
+                    } else {
+                         const isExec = e.decision === 'EXECUTE';
+                         const color = isExec ? 'green' : 'red';
+                         const borderColor = isExec ? 'border-green-500' : 'border-red-500';
+                         const bgColor = isExec ? 'bg-green-900/20' : 'bg-red-900/20';
+                         const textColor = isExec ? 'text-green-400' : 'text-red-400';
+                         
+                         return `<div class="${bgColor} p-2 rounded border-l-2 ${borderColor}">
+                            <div class="flex justify-between"><span class="font-bold ${textColor}">${e.decision}</span> <span class="text-gray-500">${time}</span></div>
+                            <div class="mt-1 text-gray-300">${e.reason}</div>
+                            <div class="mt-1 text-[10px] text-gray-500">信心: ${e.confidence}</div>
+                         </div>`;
+                    }
+                }).join('');
+            }
+
+            // Position
+            const pos = Object.values(d.positions || {})[0];
+            document.getElementById('position').innerHTML = pos ? 
+                `<div class="bg-gray-800 p-2 rounded">${pos.side === 'long' ? '📈多' : '📉空'} ${pos.size}张 入场:$${pos.entry_price?.toFixed(6)} <span class="${pos.unrealized_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">盈亏:$${pos.unrealized_pnl?.toFixed(2)}</span></div>` 
+                : '<div class="text-gray-500">暂无持仓</div>';
+            
+            // Trades
+            const trades = d.recent_trades || [];
+            document.getElementById('trades').innerHTML = trades.length ? 
+                trades.slice(-10).reverse().map(t => `<div class="py-1 border-b border-gray-700">${new Date(t.timestamp).toLocaleTimeString()} ${t.side} @$${t.price?.toFixed(6)} <span class="${t.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${t.pnl >= 0 ? '+' : ''}$${t.pnl?.toFixed(2)}</span></div>`).join('') 
+                : '暂无';
+            
+            // Signals
+            const sigs = d.recent_signals || [];
+            document.getElementById('signals').innerHTML = sigs.length ? 
+                sigs.slice(-5).reverse().map(s => `<div class="py-1"><span class="${s.signal_type === 'BUY' ? 'text-green-400' : s.signal_type === 'SELL' ? 'text-red-400' : 'text-gray-400'}">${s.signal_type}</span> ${s.confidence} - ${(s.reason || '').substring(0, 30)}</div>`).join('') 
+                : '等待信号...';
+            
+            // Logs
+            const logs = d.recent_logs || [];
+            document.getElementById('logs').innerHTML = logs.length ? 
+                logs.slice(-30).reverse().map(l => `<div class="log log-${l.level || 'INFO'}">[${new Date(l.timestamp).toLocaleTimeString()}] ${l.message}</div>`).join('') 
+                : '等待日志...';
+        }
+
+        function updateChart(klines) {
+            if (!chart || !klines?.length) return;
+            chart.data.labels = klines.map(k => new Date(k.timestamp).toLocaleTimeString().slice(0, 5));
+            chart.data.datasets[0].data = klines.map(k => k.close);
+            chart.update('none');
+            
+            const p = klines[klines.length - 1].close;
+            const pe = document.getElementById('price');
+            pe.textContent = '$' + p.toFixed(6);
+            pe.className = 'text-lg font-bold ' + (p > lastPrice ? 'text-green-400' : p < lastPrice ? 'text-red-400' : 'text-blue-400');
+            lastPrice = p;
+        }
+
+        function connect() {
+            ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+            ws.onopen = () => { document.getElementById('conn').textContent = '🟢 已连接'; document.getElementById('conn').className = 'text-green-400'; };
+            ws.onmessage = e => { const m = JSON.parse(e.data); if (m.type === 'update') { updateUI(m.data); updateChart(Object.values(m.data.klines || {})[0]); } };
+            ws.onclose = () => { document.getElementById('conn').textContent = '🔴 断开'; setTimeout(connect, 3000); };
+        }
+
+        async function control(action) {
+            await fetch(`/api/control/${action}`, { method: 'POST' });
+        }
+
+        setInterval(() => {
+            const s = Math.floor((Date.now() - start) / 1000);
+            document.getElementById('uptime').textContent = `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m ${s%60}s`;
+        }, 1000);
+
+        initChart();
+        connect();
+        fetch('/api/status').then(r => r.json()).then(updateUI);
+    </script>
+</body>
+</html>
