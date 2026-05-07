@@ -9,6 +9,9 @@ from core.message import Message, MessageType, Signal, SignalType
 from core.state_store import Trade, Position
 from exchange import OKXExchange
 from config import settings
+from harness.hitl import TelegramApprovalGate
+from harness.observability import TraceRecorder
+from harness.lifecycle import HealthMonitor, CheckpointStore
 
 
 class ExecutorAgent(BaseAgent):
@@ -27,6 +30,10 @@ class ExecutorAgent(BaseAgent):
         self._pending_orders = {}
         # 记录每个symbol的止盈止损订单ID
         self._tp_sl_orders: Dict[str, Dict[str, str]] = {}
+        self.approval_gate = TelegramApprovalGate(enabled=False)
+        self.trace = TraceRecorder()
+        self.health = HealthMonitor(timeout_seconds=120)
+        self.checkpoint = CheckpointStore()
     
     def _register_handlers(self):
         """注册消息处理器"""
@@ -88,6 +95,28 @@ class ExecutorAgent(BaseAgent):
             is_risk_close = data.get('risk_close', False)
             
             signal = Signal.from_dict(signal_data)
+            account_balance = float(self.state_store.balance.get("USDT", 0))
+            approval = await self.approval_gate.request(
+                {
+                    "amount": signal.amount,
+                    "current_price": current_price,
+                    "signal_type": signal.signal_type.value,
+                },
+                account_balance,
+            )
+            if not approval.approved:
+                await self.log("WARNING", f"HITL blocked order: {approval.reason}")
+                self.trace.record(
+                    {
+                        "trace_id": data.get("trace_id"),
+                        "symbol": signal.symbol,
+                        "stage": "executor_hitl_reject",
+                        "risk_decision": approval.reason,
+                        "side": signal.signal_type.value,
+                        "qty": signal.amount,
+                    }
+                )
+                return
             
             await self.log(
                 "INFO",
@@ -97,6 +126,14 @@ class ExecutorAgent(BaseAgent):
             
             # 执行交易
             await self._execute_signal(signal, current_price, is_risk_close)
+            self.health.mark_progress()
+            self.checkpoint.save(
+                {
+                    "last_signal": signal.to_dict(),
+                    "last_price": current_price,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            )
             
         except Exception as e:
             await self.log("ERROR", f"执行交易失败: {e}")
@@ -273,6 +310,16 @@ class ExecutorAgent(BaseAgent):
                 'signal': signal.to_dict()
             }
         )
+        self.trace.record(
+            {
+                "symbol": symbol,
+                "stage": "order_filled",
+                "side": "buy",
+                "qty": actual_filled,
+                "entry_price": actual_price,
+                "llm_response": str(signal.to_dict()),
+            }
+        )
     
     async def _open_short(self, symbol: str, amount: float, signal: Signal):
         """开空仓 + 挂止盈止损单"""
@@ -341,6 +388,16 @@ class ExecutorAgent(BaseAgent):
             {
                 'order': result.to_dict(),
                 'signal': signal.to_dict()
+            }
+        )
+        self.trace.record(
+            {
+                "symbol": symbol,
+                "stage": "order_filled",
+                "side": "sell",
+                "qty": actual_filled,
+                "entry_price": actual_price,
+                "llm_response": str(signal.to_dict()),
             }
         )
     
@@ -549,6 +606,16 @@ class ExecutorAgent(BaseAgent):
                 'close_price': result.price,
                 'pnl': pnl,
                 'reason': reason
+            }
+        )
+        self.trace.record(
+            {
+                "symbol": symbol,
+                "stage": "position_closed",
+                "exit_price": result.price,
+                "pnl": pnl,
+                "side": f"close_{position.side}",
+                "qty": position.size,
             }
         )
     

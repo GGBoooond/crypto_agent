@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from collections import deque
+from .state import MarketState, PositionState, StatsState
 
 
 @dataclass
@@ -87,6 +88,9 @@ class StateStore:
         # 账户信息
         self.balance: Dict[str, float] = {}
         self.initial_balance: float = 0.0
+        self.market_state = MarketState()
+        self.position_state = PositionState()
+        self.stats_state = StatsState()
         
         # 持仓信息
         self.positions: Dict[str, Position] = {}
@@ -135,10 +139,12 @@ class StateStore:
             if self.initial_balance == 0 and 'USDT' in balance:
                 self.initial_balance = balance['USDT']
     
-    async def update_position(self, position: Optional[Position]):
+    async def update_position(self, position: Optional[Position], symbol: Optional[str] = None):
         """
-        更新持仓
-        注意：保留现有的止盈止损订单信息（tp/sl_order_id, tp/sl_price）
+        更新持仓。
+        - position 有值：更新或新增该 symbol 的持仓，同时保留已有的 tp/sl 订单信息。
+        - position 为 None + symbol 有值：仅删除指定 symbol 的持仓。
+        - position 为 None + symbol 为 None：兜底清空所有持仓（不推荐，仅向后兼容）。
         """
         async with self._lock:
             if position:
@@ -156,22 +162,32 @@ class StateStore:
                     if position.sl_price is None and existing.sl_price:
                         position.sl_price = existing.sl_price
                 self.positions[symbol] = position
+                self.position_state.save(position)
+            elif symbol:
+                # 仅清除指定 symbol 的持仓，不影响其他 symbol
+                self.positions.pop(symbol, None)
+                self.position_state.save(None, symbol=symbol)
             else:
-                # 清空持仓
+                # 兜底：清空全部持仓（向后兼容，正常不应走到这里）
                 self.positions = {}
+                self.position_state.save(None)
     
     async def add_trade(self, trade: Trade):
         """添加交易记录"""
         async with self._lock:
             self.trades.append(trade)
             self.stats['total_trades'] += 1
+            self.stats_state.total_trades = self.stats['total_trades']
             self.stats['total_pnl'] += trade.pnl
+            self.stats_state.total_pnl = self.stats['total_pnl']
             
             if trade.pnl > 0:
                 self.stats['winning_trades'] += 1
+                self.stats_state.winning_trades = self.stats['winning_trades']
                 self.consecutive_losses = 0
             elif trade.pnl < 0:
                 self.stats['losing_trades'] += 1
+                self.stats_state.losing_trades = self.stats['losing_trades']
                 self.consecutive_losses += 1
             
             # 更新胜率
@@ -179,6 +195,7 @@ class StateStore:
                 self.stats['win_rate'] = (
                     self.stats['winning_trades'] / self.stats['total_trades']
                 )
+                self.stats_state.win_rate = self.stats['win_rate']
             
             # 更新日盈亏
             self.daily_pnl += trade.pnl
@@ -202,11 +219,13 @@ class StateStore:
         """更新市场数据"""
         async with self._lock:
             self.market_data[symbol] = data
+            self.market_state.update_market_data(symbol, data)
     
     async def update_kline(self, symbol: str, klines: List[Dict]):
         """更新K线数据"""
         async with self._lock:
             self.kline_data[symbol] = klines
+            self.market_state.update_kline(symbol, klines)
     
     async def set_system_status(self, status: str):
         """设置系统状态"""

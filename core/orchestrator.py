@@ -103,6 +103,9 @@ class Orchestrator:
         if len(self._message_history) > 1000:
             self._message_history = self._message_history[-500:]
         
+        if isinstance(message.data, dict) and "trace_id" not in message.data:
+            message.data["trace_id"] = message.msg_id
+
         if message.target:
             # 定向发送
             if message.target in self.agents:

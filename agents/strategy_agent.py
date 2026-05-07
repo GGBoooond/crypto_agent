@@ -6,7 +6,6 @@
 """
 import asyncio
 from typing import List, Optional, Dict, Any
-from datetime import datetime
 from loguru import logger
 
 from core.base_agent import BaseAgent
@@ -14,6 +13,12 @@ from core.message import Message, MessageType, Signal, SignalType, Confidence
 from strategies import StrategyFactory, BaseStrategy
 from indicators import TechnicalIndicators
 from config import settings
+from harness.cost import CostBudgetManager, StrategyDegrader
+from harness.context import KlineSummarizer, RegimeTagger, PromptBuilder
+from harness.observability import TraceRecorder
+from harness.verification.schema import parse_signal_dict
+from harness.verification.sanity import SanityVerifier
+from harness.verification.policy_gate import PolicyGate, as_verification_result
 
 
 class StrategyAgent(BaseAgent):
@@ -27,6 +32,17 @@ class StrategyAgent(BaseAgent):
         self.mode = settings.strategy_mode  # single / voting
         self.vote_threshold = settings.vote_threshold
         self.indicators = TechnicalIndicators()
+        self.budget_manager = CostBudgetManager(
+            daily_token_limit=settings.llm_daily_token_limit,
+            per_call_limit=settings.llm_per_call_token_limit,
+        )
+        self.degrader = StrategyDegrader()
+        self.kline_summarizer = KlineSummarizer()
+        self.regime_tagger = RegimeTagger()
+        self.prompt_builder = PromptBuilder()
+        self.trace = TraceRecorder()
+        self.sanity_verifier = SanityVerifier()
+        self.policy_gate = PolicyGate()
         
         # 动态加载策略
         self.strategies: List[BaseStrategy] = []
@@ -75,15 +91,23 @@ class StrategyAgent(BaseAgent):
             if symbol in self.state_store.positions:
                 position = self.state_store.positions[symbol].to_dict()
             
+            regime = self.regime_tagger.detect(klines).value
+            kline_summary = self.kline_summarizer.summarize(klines)
+            prompt = self.prompt_builder.build(symbol, regime, kline_summary, position)
+
+            # 预算检查（超过预算时降级到技术指标）
+            budget_check = self.budget_manager.check_before_call(expected_tokens=1200)
+            use_fallback = not budget_check.allowed
+
             # 执行策略分析
-            if self.mode == "single":
-                final_signal = await self._single_strategy_analyze(
-                    symbol, klines, ticker, position
-                )
+            if use_fallback:
+                final_signal = await self.degrader.fallback_signal(symbol, klines, ticker, position)
+            elif self.mode == "single":
+                final_signal = await self._single_strategy_analyze(symbol, klines, ticker, position)
+                self.budget_manager.record_usage(1200)
             else:
-                final_signal = await self._voting_analyze(
-                    symbol, klines, ticker, position
-                )
+                final_signal = await self._voting_analyze(symbol, klines, ticker, position)
+                self.budget_manager.record_usage(1200)
             
             # 发送信号
             # 注意: HOLD 信号如果带有 adjust_tp_sl 标记，也需要发送（用于调整止盈止损）
@@ -93,6 +117,67 @@ class StrategyAgent(BaseAgent):
             )
             
             if should_emit:
+                trace_id = self.trace.new_trace_id()
+                # 三层校验：schema -> sanity -> policy
+                schema_result = parse_signal_dict(final_signal.to_dict())
+                if not schema_result.passed or not schema_result.signal:
+                    await self.log("WARNING", f"Schema reject: {schema_result.reason}")
+                    self.trace.record(
+                        {
+                            "trace_id": trace_id,
+                            "symbol": symbol,
+                            "stage": "verification_schema_reject",
+                            "verification_result": schema_result.reason,
+                            "llm_prompt": prompt,
+                            "llm_response": str(final_signal.to_dict()),
+                            "regime": regime,
+                        }
+                    )
+                    return
+
+                sanity_result = self.sanity_verifier.verify(
+                    schema_result.signal,
+                    float(klines[-1]["close"]),
+                    {"atr": schema_result.signal.metadata.get("atr")},
+                )
+                if not sanity_result.passed:
+                    await self.log("WARNING", f"Sanity reject: {sanity_result.reason}")
+                    self.trace.record(
+                        {
+                            "trace_id": trace_id,
+                            "symbol": symbol,
+                            "stage": "verification_sanity_reject",
+                            "verification_result": sanity_result.reason,
+                            "llm_prompt": prompt,
+                            "llm_response": str(schema_result.signal.to_dict()),
+                            "regime": regime,
+                        }
+                    )
+                    return
+
+                policy_result = await self.policy_gate.check_signal(
+                    schema_result.signal,
+                    float(klines[-1]["close"]),
+                    self.state_store.balance,
+                    self.state_store.positions.get(symbol),
+                )
+                policy_verification = as_verification_result(policy_result)
+                if not policy_verification.passed or not policy_verification.signal:
+                    await self.log("WARNING", f"Policy reject: {policy_verification.reason}")
+                    self.trace.record(
+                        {
+                            "trace_id": trace_id,
+                            "symbol": symbol,
+                            "stage": "verification_policy_reject",
+                            "verification_result": policy_verification.reason,
+                            "llm_prompt": prompt,
+                            "llm_response": str(schema_result.signal.to_dict()),
+                            "regime": regime,
+                        }
+                    )
+                    return
+
+                final_signal = policy_verification.signal
                 self.stats['signals_generated'] += 1
                 
                 if final_signal.signal_type == SignalType.BUY:
@@ -107,8 +192,27 @@ class StrategyAgent(BaseAgent):
                     {
                         'signal': final_signal.to_dict(),
                         'current_price': klines[-1]['close'],
+                        'trace_id': trace_id,
+                        'regime': regime,
+                        'prompt': prompt,
+                        'kline_summary': kline_summary,
                     },
                     target="RiskAgent"
+                )
+
+                self.trace.record(
+                    {
+                        "trace_id": trace_id,
+                        "symbol": symbol,
+                        "regime": regime,
+                        "stage": "signal_generated",
+                        "llm_prompt": prompt,
+                        "llm_response": str(final_signal.to_dict()),
+                        "verification_result": policy_verification.reason,
+                        "side": final_signal.signal_type.value,
+                        "qty": final_signal.amount,
+                        "skill_used": final_signal.metadata.get("skill_used"),
+                    }
                 )
                 
                 # 调整止盈止损用不同的日志格式
@@ -151,7 +255,10 @@ class StrategyAgent(BaseAgent):
             return signal
         except Exception as e:
             await self.log("ERROR", f"策略{strategy.name}执行失败: {e}")
-            return None
+            fallback = await self.degrader.fallback_signal(symbol, klines, ticker, position)
+            if fallback:
+                fallback.metadata["degraded_from"] = strategy.name
+            return fallback
     
     async def _voting_analyze(
         self,

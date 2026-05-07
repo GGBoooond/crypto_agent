@@ -9,6 +9,7 @@ from core.message import Message, MessageType, Signal
 from core.state_store import Position
 from risk import RiskManager, RiskDecision
 from config import RiskConfig
+from harness.observability import TraceRecorder
 
 
 class RiskAgent(BaseAgent):
@@ -21,6 +22,7 @@ class RiskAgent(BaseAgent):
         super().__init__(name="RiskAgent")
         self.risk_manager = RiskManager(RiskConfig())
         self._monitor_task: Optional[asyncio.Task] = None
+        self.trace = TraceRecorder()
     
     def _register_handlers(self):
         """注册消息处理器"""
@@ -47,6 +49,7 @@ class RiskAgent(BaseAgent):
             data = message.data
             signal_data = data['signal']
             current_price = data['current_price']
+            trace_id = data.get('trace_id')
             
             # 重建Signal对象
             signal = Signal.from_dict(signal_data)
@@ -67,6 +70,17 @@ class RiskAgent(BaseAgent):
                 "INFO",
                 f"风控检查: {result.decision.value} - {result.reason}"
             )
+            self.trace.record(
+                {
+                    "trace_id": trace_id,
+                    "symbol": signal.symbol,
+                    "stage": "risk_check",
+                    "risk_decision": result.decision.value,
+                    "verification_result": result.reason,
+                    "side": signal.signal_type.value,
+                    "qty": signal.amount,
+                }
+            )
             
             if result.decision == RiskDecision.APPROVED:
                 # 发送执行请求
@@ -74,7 +88,8 @@ class RiskAgent(BaseAgent):
                     MessageType.SIGNAL_APPROVED,
                     {
                         'signal': signal.to_dict(),
-                        'current_price': current_price
+                        'current_price': current_price,
+                        'trace_id': trace_id,
                     },
                     target="ExecutorAgent"
                 )
@@ -87,7 +102,8 @@ class RiskAgent(BaseAgent):
                         'signal': result.modified_signal.to_dict(),
                         'current_price': current_price,
                         'modified': True,
-                        'modification_reason': result.reason
+                        'modification_reason': result.reason,
+                        'trace_id': trace_id,
                     },
                     target="ExecutorAgent"
                 )
@@ -97,7 +113,8 @@ class RiskAgent(BaseAgent):
                     MessageType.SIGNAL_REJECTED,
                     {
                         'signal': signal.to_dict(),
-                        'reason': result.reason
+                        'reason': result.reason,
+                        'trace_id': trace_id,
                     }
                 )
                 

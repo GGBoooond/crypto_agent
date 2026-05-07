@@ -1,0 +1,28 @@
+{
+  "last_signal": {
+    "signal_type": "BUY",
+    "symbol": "DOGE/USDT:USDT",
+    "confidence": "HIGH",
+    "reason": "[Sniper] [LONG] BULLISH_TREND_PULLBACK (EMA50 Support + RSI Reset) | AI: \u8d8b\u52bf\u73af\u5883\u5f3a\u52b2\uff08ADX 38.78\uff09\uff0c\u4ef7\u683c\u56de\u8c03\u81f3EMA50\u9644\u8fd1\u83b7\u5f97\u652f\u6491\uff0cRSI 38.04\u5904\u4e8e\u8d85\u5356\u533a\u57df\uff0cMACD\u67f1\u72b6\u56fe\u8fde\u7eed5\u6839\u6536\u7f29\uff0c\u52a8\u91cf\u5373\u5c06\u8f6c\u6b63\u3002K\u7ebf\u5f62\u6001\u663e\u793aT-10\u653e\u91cf\u4e0b\u8dcc\u540e\u51fa\u73b0\u957f\u4e0b\u5f71\u7ebf\uff0855%\uff09\uff0c\u968f\u540e\u8fde\u7eed\u51fa\u73b0\u9633\u7ebf\u6b62\u8dcc\uff0cT-8\u9633\u5305\u9634\u786e\u8ba4\u652f\u6491\uff0c\u8fd1\u671f\u7f29\u91cf\u9707\u8361\uff08RVol 0.14x\uff09\u8868\u660e\u629b\u538b\u8870\u7aed\u3002\u76ee\u6807\u5229\u6da63.0%\u6ee1\u8db3\u8981\u6c42\uff0c\u6b62\u635f\u8bbe\u4e8e\u8fd1\u671f\u4f4e\u70b90.11133\u4e0b\u65b9\uff0c\u76c8\u4e8f\u6bd4\u7ea62:1\uff0c\u7b26\u5408\u89c4\u5219\u3002",
+    "stop_loss": 0.11163,
+    "take_profit": 0.11673,
+    "amount": 0.1,
+    "strategy_name": "AITrendSniperStrategy",
+    "weight": 1.0,
+    "timestamp": "2026-05-07T00:09:01.600913",
+    "metadata": {
+      "place_tp_sl_orders": true,
+      "sniper_data": {
+        "signal_dir": "LONG",
+        "trigger": "BULLISH_TREND_PULLBACK (EMA50 Support + RSI Reset)",
+        "adx": 38.78,
+        "rsi": 38.04,
+        "r_vol": 0.14,
+        "ema_dist": 0.02,
+        "atr": 0.00076
+      }
+    }
+  },
+  "last_price": 0.11333,
+  "timestamp": "2026-05-06T16:09:01.987118"
+}

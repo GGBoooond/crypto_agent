@@ -23,26 +23,55 @@ crypto_agent/
 │   ├── base_agent.py        # Agent 基类
 │   ├── orchestrator.py      # 协调器
 │   ├── state_store.py       # 状态存储
-│   └── message.py           # 消息定义
+│   ├── message.py           # 消息定义
+│   └── state/               # 拆分状态组件
+│       ├── market_state.py  # 行情状态
+│       ├── position_state.py # 持仓状态 (SQLite)
+│       └── stats.py         # 统计状态
 ├── agents/                   # Agent 实现
 │   ├── market_agent.py      # 行情 Agent
 │   ├── strategy_agent.py    # 策略 Agent
 │   ├── risk_agent.py        # 风控 Agent
 │   ├── executor_agent.py    # 执行 Agent
 │   └── logger_agent.py      # 日志 Agent
-├── strategies/               # 策略模块
-│   ├── ai_strategy.py       # AI 分析策略
-│   ├── technical_strategy.py # 技术指标策略
-│   └── trend_strategy.py    # 趋势跟踪策略
+├── strategies/                    # 策略模块
+│   ├── base_strategy.py          # 策略基类
+│   ├── ai_strategy.py            # AI 分析策略
+│   ├── ai_scalping_strategy.py   # AI 剥头皮策略
+│   ├── ai_hybrid_strategy.py     # AI 混合策略 V3
+│   ├── ai_hybrid_v4_strategy.py  # AI 混合策略 V4
+│   ├── ai_trend_sniper_strategy.py # AI 趋势狙击策略
+│   ├── technical_strategy.py     # 技术指标策略
+│   └── trend_strategy.py         # 趋势跟踪策略
+├── harness/                  # Harness V2 运行时护栏
+│   ├── verification/        # 信号校验 (schema/sanity/policy)
+│   ├── cost/                # LLM 预算与降级
+│   ├── context/             # K线摘要、regime 标签、prompt 构建
+│   ├── observability/       # 全链路追踪 (SQLite+FTS5) 与评估
+│   ├── hitl/                # 人工审批门 (Telegram 桩)
+│   └── lifecycle/           # 健康监控、checkpoint
+├── evolution/                # 自演进引擎
+│   ├── postmortem.py        # 复盘草案生成
+│   ├── skill_health.py      # 技能健康度统计
+│   ├── skill_lifecycle.py   # 技能生命周期管理
+│   ├── walk_forward.py      # 前向验证
+│   └── judge.py             # LLM-as-judge 评分
+├── memory/                   # 记忆与技能
+│   ├── MEMORY.md            # 市场经验记忆
+│   ├── USER.md              # 用户偏好
+│   ├── memory_tool.py       # 记忆读写工具
+│   ├── skill_manage.py      # 技能管理
+│   └── skills/              # 技能模板 (SKILL.md)
 ├── exchange/                 # 交易所适配
 │   ├── base_exchange.py     # 交易所基类
-│   └── okx_exchange.py      # OKX 实现
+│   ├── okx_exchange.py      # OKX 实现
+│   └── okx_client_pool.py   # OKX 客户端池
 ├── indicators/               # 技术指标
 │   └── technical.py         # RSI, MACD, BB 等
-├── risk/                     # 风控模块
-│   └── risk_manager.py      # 风险管理器
+├── risk/                     # 风控模块 (兼容层 → harness/verification/policy_gate)
+│   └── risk_manager.py
 ├── web/                      # Web 监控
-│   ├── app.py               # FastAPI 应用
+│   ├── app.py               # FastAPI 应用 (含路由和 WebSocket)
 │   └── static/index.html    # 前端页面
 └── utils/                    # 工具模块
     ├── logger.py            # 日志配置
@@ -76,10 +105,11 @@ OKX_PASSPHRASE=your_passphrase
 DEEPSEEK_API_KEY=your_deepseek_api_key
 
 # 交易配置
-TRADING_SYMBOL=BTC/USDT:USDT
-TRADING_AMOUNT=0.01
-TRADING_LEVERAGE=10
-TRADING_TIMEFRAME=15m
+TRADING_SYMBOL=DOGE/USDT:USDT
+TRADING_AMOUNT=100
+TRADING_LEVERAGE=5
+TRADING_TIMEFRAME=1m
+TRADING_INTERVAL=120
 TEST_MODE=true  # 先用测试模式
 ```
 
@@ -113,9 +143,25 @@ ExecutorAgent (执行交易)
 LoggerAgent (记录日志)
 ```
 
+### Harness V2 信号链路
+
+信号从生成到执行需经过多层护栏（`harness/`）：
+
+```
+行情 → 预算检查 → 策略分析(或降级) → Schema校验 → Sanity校验 → Policy门
+  → RiskAgent → HITL审批门 → ExecutorAgent
+```
+
+- **预算超限**时自动降级到纯技术指标策略，不消耗 LLM token
+- **三层校验**（Schema / Sanity / Policy）拦截格式错误、方向矛盾、仓位超限等异常信号
+- 全链路写入 **trace**（SQLite + FTS5），支持事后检索与复盘
+
 ### 信号融合机制
 
-系统采用加权投票机制融合多个策略的信号：
+支持两种策略模式，由 `STRATEGY_MODE` 配置：
+
+- **single**（默认）：使用单一策略，通过 `ENABLED_STRATEGIES` 指定
+- **voting**：加权投票融合多个策略
 
 | 策略 | 权重 | 说明 |
 |------|------|------|
@@ -127,10 +173,12 @@ LoggerAgent (记录日志)
 
 | 规则 | 默认值 | 说明 |
 |------|--------|------|
-| 最大持仓比例 | 20% | 单币种最大持仓 |
+| 最大持仓比例 | 30% | 单币种最大持仓 |
 | 单笔止损 | 2% | 单笔最大亏损 |
 | 日止损 | 5% | 单日最大亏损 |
-| 连续亏损暂停 | 3次 | 自动暂停交易 |
+| 最大杠杆 | 10x | 允许的最大杠杆 |
+| 连续亏损暂停 | 5次 | 自动暂停交易 |
+| 每日最大交易 | 50次 | 单日交易上限 |
 
 ## 🛠️ 扩展开发
 
@@ -206,20 +254,40 @@ class BinanceExchange(BaseExchange):
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| TRADING_SYMBOL | 交易对 | BTC/USDT:USDT |
-| TRADING_AMOUNT | 每笔交易数量 | 0.01 |
-| TRADING_LEVERAGE | 杠杆倍数 | 10 |
-| TRADING_TIMEFRAME | K线周期 | 15m |
+| TRADING_SYMBOL | 交易对 | DOGE/USDT:USDT |
+| TRADING_AMOUNT | 每笔交易张数 | 100 |
+| TRADING_LEVERAGE | 杠杆倍数 | 5 |
+| TRADING_TIMEFRAME | K线周期 | 1m |
+| TRADING_INTERVAL | 分析间隔(秒) | 120 |
 | TEST_MODE | 测试模式 | true |
+
+### 策略参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| ENABLED_STRATEGIES | 启用的策略 | ai_scalping |
+| STRATEGY_MODE | 策略模式 | single |
+| VOTE_THRESHOLD | 投票阈值 | 0.4 |
+
+### LLM 预算参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| LLM_DAILY_TOKEN_LIMIT | 日 token 预算 | 200000 |
+| LLM_PER_CALL_TOKEN_LIMIT | 单次调用 token 上限 | 4000 |
+
+超出预算时 StrategyAgent 自动降级到纯技术指标策略，不再调用 LLM。
 
 ### 风控参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| MAX_POSITION_RATIO | 最大持仓比例 | 0.2 |
+| MAX_POSITION_RATIO | 最大持仓比例 | 0.3 |
 | STOP_LOSS_RATIO | 单笔止损比例 | 0.02 |
 | DAILY_STOP_LOSS_RATIO | 日止损比例 | 0.05 |
-| MAX_CONSECUTIVE_LOSSES | 连续亏损暂停 | 3 |
+| MAX_LEVERAGE | 最大杠杆倍数 | 10 |
+| MAX_CONSECUTIVE_LOSSES | 连续亏损暂停 | 5 |
+| MAX_DAILY_TRADES | 每日最大交易次数 | 50 |
 
 ## 📝 开发日志
 

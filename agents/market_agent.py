@@ -181,7 +181,7 @@ class MarketAgent(BaseAgent):
                             'reason': 'TP/SL triggered or manual close',
                             'cleanup_algo_orders': True
                         })
-                    await self.state_store.update_position(None)
+                    await self.state_store.update_position(None, symbol=self.symbol)
             except Exception as e:
                 logger.debug(f"获取持仓异常: {e}")
             

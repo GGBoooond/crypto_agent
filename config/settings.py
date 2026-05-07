@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     deepseek_base_url: str = Field(default="https://api.deepseek.com", alias="DEEPSEEK_BASE_URL")
     ai_model: str = Field(default="deepseek-chat", alias="AI_MODEL")
     ai_temperature: float = Field(default=0.3, alias="AI_TEMPERATURE")
+    llm_daily_token_limit: int = Field(default=200000, alias="LLM_DAILY_TOKEN_LIMIT")
+    llm_per_call_token_limit: int = Field(default=4000, alias="LLM_PER_CALL_TOKEN_LIMIT")
     
     # ==================== 交易配置 ====================
     trading_symbol: str = Field(default="DOGE/USDT:USDT", alias="TRADING_SYMBOL")

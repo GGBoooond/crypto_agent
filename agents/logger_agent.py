@@ -5,6 +5,7 @@ from loguru import logger
 
 from core.base_agent import BaseAgent
 from core.message import Message, MessageType
+from harness.observability import TraceRecorder, EvaluationEngine
 
 
 class LoggerAgent(BaseAgent):
@@ -17,6 +18,8 @@ class LoggerAgent(BaseAgent):
         super().__init__(name="LoggerAgent")
         self.events: List[Dict[str, Any]] = []
         self.trade_log: List[Dict[str, Any]] = []
+        self.trace = TraceRecorder()
+        self.evaluator = EvaluationEngine()
     
     def _register_handlers(self):
         """注册所有消息类型的处理器"""
@@ -34,6 +37,14 @@ class LoggerAgent(BaseAgent):
         }
         
         self.events.append(event)
+        self.trace.record(
+            {
+                "trace_id": message.data.get("trace_id") if isinstance(message.data, dict) else None,
+                "stage": f"logger_{message.msg_type.value}",
+                "symbol": message.data.get("signal", {}).get("symbol") if isinstance(message.data, dict) else None,
+                "raw_payload": message.data if isinstance(message.data, dict) else {"data": str(message.data)},
+            }
+        )
         
         # 保持事件列表在合理范围
         if len(self.events) > 1000:
@@ -123,7 +134,8 @@ class LoggerAgent(BaseAgent):
             'win_rate': f"{stats['win_rate']*100:.1f}%",
             'total_pnl': f"${stats['total_pnl']:+,.2f}",
             'daily_pnl': f"${self.state_store.daily_pnl:+,.2f}",
-            'trade_log': self.trade_log[-20:]  # 最近20笔交易
+            'trade_log': self.trade_log[-20:],  # 最近20笔交易
+            'evaluation': self.evaluator.summarize(),
         }
         
         return report
