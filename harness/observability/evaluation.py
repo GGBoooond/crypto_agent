@@ -1,7 +1,7 @@
 """Offline evaluation utilities for traces."""
 import sqlite3
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 
 class EvaluationEngine:
@@ -60,3 +60,57 @@ class EvaluationEngine:
             "ic_proxy": float(ic_proxy),
         }
 
+    def context_efficiency(self) -> Dict[str, float]:
+        """Aggregate prompt-token / compression metrics from the trace store.
+
+        Returns zeroes if the database is missing or no harness-mode traces
+        have been recorded yet (e.g. fresh deployment).
+        """
+        empty = {
+            "samples": 0.0,
+            "avg_prompt_tokens": 0.0,
+            "avg_completion_tokens": 0.0,
+            "avg_kline_compression_ratio": 0.0,
+            "skill_hit_rate": 0.0,
+        }
+        if not self.db_path.exists():
+            return empty
+
+        try:
+            with self._connect() as conn:
+                rows: List[Dict[str, Any]] = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT prompt_tokens, completion_tokens,
+                               kline_compression_ratio, skill_used, stage
+                        FROM traces
+                        WHERE stage = 'signal_generated'
+                        ORDER BY timestamp DESC
+                        LIMIT 500
+                        """
+                    ).fetchall()
+                ]
+        except sqlite3.OperationalError:
+            return empty
+
+        if not rows:
+            return empty
+
+        prompt_tokens = [int(r["prompt_tokens"] or 0) for r in rows]
+        completion_tokens = [int(r["completion_tokens"] or 0) for r in rows]
+        ratios = [float(r["kline_compression_ratio"] or 0.0) for r in rows]
+        skill_hits = sum(1 for r in rows if (r.get("skill_used") or "").strip())
+
+        sample_count = len(rows)
+        return {
+            "samples": float(sample_count),
+            "avg_prompt_tokens": float(sum(prompt_tokens) / sample_count) if sample_count else 0.0,
+            "avg_completion_tokens": (
+                float(sum(completion_tokens) / sample_count) if sample_count else 0.0
+            ),
+            "avg_kline_compression_ratio": (
+                float(sum(ratios) / sample_count) if sample_count else 0.0
+            ),
+            "skill_hit_rate": float(skill_hits / sample_count) if sample_count else 0.0,
+        }

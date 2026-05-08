@@ -11,6 +11,14 @@ from typing import Any, Dict, Optional
 class TraceRecorder:
     """Record strategy -> risk -> execution chain with trace ids."""
 
+    # Columns added since the original schema. Append-only — never remove an
+    # entry once it ships, otherwise we'd break old databases on upgrade.
+    _ADDITIONAL_COLUMNS: Dict[str, str] = {
+        "prompt_tokens": "INTEGER",
+        "completion_tokens": "INTEGER",
+        "kline_compression_ratio": "REAL",
+    }
+
     def __init__(self, db_path: str = "memory/trades.db"):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,6 +54,7 @@ class TraceRecorder:
                 )
                 """
             )
+            self._migrate_columns(conn)
             conn.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS traces_fts
@@ -61,6 +70,12 @@ class TraceRecorder:
                 END
                 """
             )
+
+    def _migrate_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(traces)").fetchall()}
+        for column, ddl_type in self._ADDITIONAL_COLUMNS.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE traces ADD COLUMN {column} {ddl_type}")
 
     def new_trace_id(self) -> str:
         return f"trace_{uuid.uuid4().hex}"
@@ -90,8 +105,9 @@ class TraceRecorder:
                 INSERT OR REPLACE INTO traces (
                     trace_id, timestamp, symbol, regime, skill_used, stage,
                     llm_prompt, llm_response, verification_result, risk_decision,
-                    side, qty, entry_price, exit_price, pnl, holding_minutes, raw_payload
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    side, qty, entry_price, exit_price, pnl, holding_minutes,
+                    raw_payload, prompt_tokens, completion_tokens, kline_compression_ratio
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace_id,
@@ -111,6 +127,9 @@ class TraceRecorder:
                     payload.get("pnl"),
                     payload.get("holding_minutes"),
                     json.dumps(payload, ensure_ascii=True, default=self._json_default),
+                    payload.get("prompt_tokens"),
+                    payload.get("completion_tokens"),
+                    payload.get("kline_compression_ratio"),
                 ),
             )
 
@@ -127,4 +146,3 @@ class TraceRecorder:
                 (query, limit),
             )
             return [dict(row) for row in cur.fetchall()]
-

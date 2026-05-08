@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     ai_temperature: float = Field(default=0.3, alias="AI_TEMPERATURE")
     llm_daily_token_limit: int = Field(default=200000, alias="LLM_DAILY_TOKEN_LIMIT")
     llm_per_call_token_limit: int = Field(default=4000, alias="LLM_PER_CALL_TOKEN_LIMIT")
+    # AI prompt 构建模式: harness(走 PromptBuilder) | legacy(策略内自建 prompt)
+    ai_prompt_mode: str = Field(default="harness", alias="AI_PROMPT_MODE")
     
     # ==================== 交易配置 ====================
     trading_symbol: str = Field(default="DOGE/USDT:USDT", alias="TRADING_SYMBOL")

@@ -5,16 +5,23 @@
 - 投票模式：多策略加权投票
 """
 import asyncio
+import inspect
 from typing import List, Optional, Dict, Any
 from loguru import logger
 
 from core.base_agent import BaseAgent
 from core.message import Message, MessageType, Signal, SignalType, Confidence
 from strategies import StrategyFactory, BaseStrategy
+from strategies.base_ai_strategy import BaseAIStrategy
 from indicators import TechnicalIndicators
 from config import settings
 from harness.cost import CostBudgetManager, StrategyDegrader
-from harness.context import KlineSummarizer, RegimeTagger, PromptBuilder
+from harness.context import (
+    KlineSummarizer,
+    RegimeTagger,
+    PromptBuilder,
+    StrategyContext,
+)
 from harness.observability import TraceRecorder
 from harness.verification.schema import parse_signal_dict
 from harness.verification.sanity import SanityVerifier
@@ -47,6 +54,8 @@ class StrategyAgent(BaseAgent):
         # 动态加载策略
         self.strategies: List[BaseStrategy] = []
         self._load_strategies()
+        # 把共享的 prompt builder / budget manager 注入给 AI 策略，避免重复加载 MEMORY/SKILL
+        self._wire_ai_strategies()
         
         # 统计
         self.stats = {
@@ -91,23 +100,45 @@ class StrategyAgent(BaseAgent):
             if symbol in self.state_store.positions:
                 position = self.state_store.positions[symbol].to_dict()
             
-            regime = self.regime_tagger.detect(klines).value
+            regime_enum, regime_metrics = self.regime_tagger.detect_with_metrics(klines)
+            regime = regime_enum.value
+            regime_extra = (
+                f"change_pct={regime_metrics.change_pct} "
+                f"volatility={regime_metrics.volatility} "
+                f"sample_size={regime_metrics.sample_size}"
+            )
             kline_summary = self.kline_summarizer.summarize(klines)
-            prompt = self.prompt_builder.build(symbol, regime, kline_summary, position)
+            prompt = self.prompt_builder.build(
+                symbol, regime, kline_summary, position, regime_extra=regime_extra
+            )
+            trace_id = self.trace.new_trace_id()
+            strategy_ctx = StrategyContext(
+                regime=regime,
+                regime_extra=regime_extra,
+                kline_summary=kline_summary,
+                prompt_builder=self.prompt_builder,
+                trace_id=trace_id,
+            )
 
-            # 预算检查（超过预算时降级到技术指标）
-            budget_check = self.budget_manager.check_before_call(expected_tokens=1200)
+            # 预算检查（超过预算时降级到技术指标）。预算估算改为基于实际 prompt 字符数
+            estimated_tokens = max(
+                1200,
+                PromptBuilder.estimate_tokens([{"role": "user", "content": prompt}]),
+            )
+            budget_check = self.budget_manager.check_before_call(expected_tokens=estimated_tokens)
             use_fallback = not budget_check.allowed
 
             # 执行策略分析
             if use_fallback:
                 final_signal = await self.degrader.fallback_signal(symbol, klines, ticker, position)
             elif self.mode == "single":
-                final_signal = await self._single_strategy_analyze(symbol, klines, ticker, position)
-                self.budget_manager.record_usage(1200)
+                final_signal = await self._single_strategy_analyze(
+                    symbol, klines, ticker, position, strategy_ctx
+                )
             else:
-                final_signal = await self._voting_analyze(symbol, klines, ticker, position)
-                self.budget_manager.record_usage(1200)
+                final_signal = await self._voting_analyze(
+                    symbol, klines, ticker, position, strategy_ctx
+                )
             
             # 发送信号
             # 注意: HOLD 信号如果带有 adjust_tp_sl 标记，也需要发送（用于调整止盈止损）
@@ -117,8 +148,7 @@ class StrategyAgent(BaseAgent):
             )
             
             if should_emit:
-                trace_id = self.trace.new_trace_id()
-                # 三层校验：schema -> sanity -> policy
+                # 三层校验：schema -> sanity -> policy（trace_id 已在前面生成）
                 schema_result = parse_signal_dict(final_signal.to_dict())
                 if not schema_result.passed or not schema_result.signal:
                     await self.log("WARNING", f"Schema reject: {schema_result.reason}")
@@ -186,7 +216,15 @@ class StrategyAgent(BaseAgent):
                     self.stats['sell_signals'] += 1
                 
                 await self.state_store.add_signal(final_signal.to_dict())
-                
+
+                # 如策略真实拿到了 prompt_messages（走 harness 路径），优先记录策略真实 prompt
+                strategy_prompt_text, llm_usage = self._extract_prompt_and_usage(
+                    final_signal, fallback_prompt=prompt
+                )
+                kline_compression_ratio = self._compute_compression_ratio(
+                    klines, strategy_prompt_text
+                )
+
                 await self.emit(
                     MessageType.SIGNAL_GENERATED,
                     {
@@ -194,8 +232,9 @@ class StrategyAgent(BaseAgent):
                         'current_price': klines[-1]['close'],
                         'trace_id': trace_id,
                         'regime': regime,
-                        'prompt': prompt,
+                        'prompt': strategy_prompt_text,
                         'kline_summary': kline_summary,
+                        'llm_usage': llm_usage,
                     },
                     target="RiskAgent"
                 )
@@ -206,12 +245,15 @@ class StrategyAgent(BaseAgent):
                         "symbol": symbol,
                         "regime": regime,
                         "stage": "signal_generated",
-                        "llm_prompt": prompt,
+                        "llm_prompt": strategy_prompt_text,
                         "llm_response": str(final_signal.to_dict()),
                         "verification_result": policy_verification.reason,
                         "side": final_signal.signal_type.value,
                         "qty": final_signal.amount,
                         "skill_used": final_signal.metadata.get("skill_used"),
+                        "prompt_tokens": llm_usage.get("prompt_tokens"),
+                        "completion_tokens": llm_usage.get("completion_tokens"),
+                        "kline_compression_ratio": kline_compression_ratio,
                     }
                 )
                 
@@ -242,16 +284,17 @@ class StrategyAgent(BaseAgent):
         symbol: str,
         klines: List[Dict],
         ticker: Dict,
-        position: Optional[Dict]
+        position: Optional[Dict],
+        context: Optional[StrategyContext] = None,
     ) -> Optional[Signal]:
         """单策略模式"""
         if not self.strategies:
             return None
-        
+
         strategy = self.strategies[0]
-        
+
         try:
-            signal = await strategy.analyze(symbol, klines, ticker, position)
+            signal = await self._invoke_analyze(strategy, symbol, klines, ticker, position, context)
             return signal
         except Exception as e:
             await self.log("ERROR", f"策略{strategy.name}执行失败: {e}")
@@ -265,7 +308,8 @@ class StrategyAgent(BaseAgent):
         symbol: str,
         klines: List[Dict],
         ticker: Dict,
-        position: Optional[Dict]
+        position: Optional[Dict],
+        context: Optional[StrategyContext] = None,
     ) -> Optional[Signal]:
         """投票模式"""
         signals: List[Signal] = []
@@ -274,7 +318,9 @@ class StrategyAgent(BaseAgent):
         tasks = []
         for strategy in self.strategies:
             if strategy.enabled:
-                tasks.append(self._get_signal(strategy, symbol, klines, ticker, position))
+                tasks.append(
+                    self._get_signal(strategy, symbol, klines, ticker, position, context)
+                )
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -293,11 +339,12 @@ class StrategyAgent(BaseAgent):
         symbol: str,
         klines: List[Dict],
         ticker: Dict,
-        position: Optional[Dict]
+        position: Optional[Dict],
+        context: Optional[StrategyContext] = None,
     ) -> Optional[Signal]:
         """获取单个策略信号"""
         try:
-            return await strategy.analyze(symbol, klines, ticker, position)
+            return await self._invoke_analyze(strategy, symbol, klines, ticker, position, context)
         except Exception as e:
             logger.error(f"策略{strategy.name}异常: {e}")
             return None
@@ -389,3 +436,80 @@ class StrategyAgent(BaseAgent):
     
     def get_stats(self) -> Dict[str, Any]:
         return self.stats
+
+    # ------------------------------------------------------------------
+    # Helpers for strategy invocation, prompt extraction, compression metric
+    # ------------------------------------------------------------------
+    def _wire_ai_strategies(self) -> None:
+        """Inject shared PromptBuilder + budget manager into AI strategies.
+
+        Avoids each strategy maintaining its own MEMORY/SKILL caches and lets
+        token usage flow back into the global budget manager.
+        """
+        for strategy in self.strategies:
+            if isinstance(strategy, BaseAIStrategy):
+                strategy.prompt_builder = self.prompt_builder
+                strategy.kline_summarizer = self.kline_summarizer
+                strategy.budget_manager = self.budget_manager
+
+    async def _invoke_analyze(
+        self,
+        strategy: BaseStrategy,
+        symbol: str,
+        klines: List[Dict],
+        ticker: Dict,
+        position: Optional[Dict],
+        context: Optional[StrategyContext],
+    ) -> Optional[Signal]:
+        """Call strategy.analyze with optional context, gracefully degrading
+        for legacy strategies whose signature does not accept it."""
+        analyze = strategy.analyze
+        try:
+            sig = inspect.signature(analyze)
+            if "context" in sig.parameters:
+                return await analyze(symbol, klines, ticker, position, context=context)
+        except (TypeError, ValueError):
+            pass
+        return await analyze(symbol, klines, ticker, position)
+
+    @staticmethod
+    def _extract_prompt_and_usage(
+        signal: Signal,
+        fallback_prompt: str,
+    ) -> tuple:
+        """Pull the actual prompt sent to the LLM (if available) and usage."""
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        prompt_text = fallback_prompt
+        try:
+            metadata = signal.metadata or {}
+            messages = metadata.get("prompt_messages")
+            if messages:
+                prompt_text = "\n\n".join(
+                    f"[{m.get('role', '')}]\n{m.get('content', '')}"
+                    for m in messages
+                )
+            llm_usage = metadata.get("llm_usage")
+            if llm_usage:
+                usage = {
+                    "prompt_tokens": int(llm_usage.get("prompt_tokens", 0) or 0),
+                    "completion_tokens": int(llm_usage.get("completion_tokens", 0) or 0),
+                    "total_tokens": int(llm_usage.get("total_tokens", 0) or 0),
+                }
+        except Exception:
+            pass
+        return prompt_text, usage
+
+    @staticmethod
+    def _compute_compression_ratio(klines: List[Dict[str, Any]], prompt_text: str) -> float:
+        """Naive ratio: prompt_chars / raw_kline_chars (lower = more compressed)."""
+        if not klines or not prompt_text:
+            return 0.0
+        raw_chars = sum(
+            len(str(k.get("open", ""))) + len(str(k.get("close", "")))
+            + len(str(k.get("high", ""))) + len(str(k.get("low", "")))
+            + len(str(k.get("volume", "")))
+            for k in klines
+        )
+        if raw_chars == 0:
+            return 0.0
+        return round(len(prompt_text) / raw_chars, 3)
