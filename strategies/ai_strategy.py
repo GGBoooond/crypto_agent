@@ -1,11 +1,11 @@
-"""AI分析策略 - 使用DeepSeek进行市场分析"""
+"""AI分析策略 - 使用 LLMClient 调用任意 OpenAI 协议兼容模型"""
 import json
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from openai import AsyncOpenAI
 from loguru import logger
 
 from .base_strategy import BaseStrategy
+from .llm_client import LLMClient
 from core.message import Signal, SignalType, Confidence
 from config import settings
 
@@ -13,19 +13,15 @@ from config import settings
 class AIStrategy(BaseStrategy):
     """
     AI分析策略
-    使用DeepSeek大模型分析市场数据
+    使用 LLMClient 调用配置的大模型分析市场数据
     """
     
     def __init__(self, weight: float = 0.4):
         super().__init__(name="AIStrategy", weight=weight)
-        
-        # 初始化DeepSeek客户端
-        self.client = AsyncOpenAI(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url
-        )
-        
-        # 分析历史记录
+
+        self.llm_client = LLMClient()
+        self.client = self.llm_client.async_client
+
         self.analysis_history: List[Dict] = []
         
     def _build_prompt(
@@ -128,8 +124,7 @@ class AIStrategy(BaseStrategy):
         try:
             prompt = self._build_prompt(symbol, klines, market_data, position, indicators)
             
-            response = await self.client.chat.completions.create(
-                model="deepseek-chat",
+            response = await self.llm_client.chat_completion(
                 messages=[
                     {
                         "role": "system",

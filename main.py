@@ -24,6 +24,7 @@ from agents import MarketAgent, RiskAgent, ExecutorAgent, LoggerAgent
 from agents.strategy_agent import StrategyAgent
 from web.app import create_app
 from utils.logger import setup_logger
+from harness.observability import ForwardReturnBackfiller
 
 
 class CryptoAgentSystem:
@@ -34,6 +35,7 @@ class CryptoAgentSystem:
         self.state_store = StateStore()
         self.app = None
         self._shutdown = asyncio.Event()
+        self._background_tasks = []
     
     def setup(self):
         """初始化"""
@@ -75,11 +77,20 @@ class CryptoAgentSystem:
             logger.warning("⚠️ 实盘模式！")
         
         await self.orchestrator.start()
+        backfiller = ForwardReturnBackfiller()
+        self._background_tasks.append(asyncio.create_task(backfiller.run_forever()))
         await self._shutdown.wait()
     
     async def stop(self):
         """停止"""
         logger.info("停止系统...")
+        for task in self._background_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._background_tasks = []
         await self.orchestrator.stop()
         logger.info("系统已停止")
     

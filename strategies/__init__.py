@@ -13,6 +13,8 @@ from typing import Dict, Type, List, Optional
 from loguru import logger
 
 from .base_strategy import BaseStrategy
+from .base_ai_strategy import BaseAIStrategy
+from .prompt_only_ai_strategy import PromptOnlyAIStrategy
 from .ai_strategy import AIStrategy
 from .technical_strategy import TechnicalStrategy
 from .trend_strategy import TrendStrategy
@@ -95,8 +97,10 @@ class StrategyFactory:
 
 __all__ = [
     'BaseStrategy',
-    'AIStrategy', 
-    'TechnicalStrategy', 
+    'BaseAIStrategy',
+    'PromptOnlyAIStrategy',
+    'AIStrategy',
+    'TechnicalStrategy',
     'TrendStrategy',
     'AIScalpingStrategy',
     'AIHybridStrategy',

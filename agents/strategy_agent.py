@@ -5,7 +5,9 @@
 - 投票模式：多策略加权投票
 """
 import asyncio
+import hashlib
 import inspect
+import json
 from typing import List, Optional, Dict, Any
 from loguru import logger
 
@@ -221,9 +223,14 @@ class StrategyAgent(BaseAgent):
                 strategy_prompt_text, llm_usage = self._extract_prompt_and_usage(
                     final_signal, fallback_prompt=prompt
                 )
+                prompt_hash = hashlib.sha256(
+                    strategy_prompt_text.encode("utf-8")
+                ).hexdigest()[:16]
                 kline_compression_ratio = self._compute_compression_ratio(
                     klines, strategy_prompt_text
                 )
+                market_metadata = self._build_market_metadata(data)
+                model_version = self._extract_model_version()
 
                 await self.emit(
                     MessageType.SIGNAL_GENERATED,
@@ -254,6 +261,10 @@ class StrategyAgent(BaseAgent):
                         "prompt_tokens": llm_usage.get("prompt_tokens"),
                         "completion_tokens": llm_usage.get("completion_tokens"),
                         "kline_compression_ratio": kline_compression_ratio,
+                        "model_id": settings.ai_model,
+                        "model_version": model_version,
+                        "prompt_hash": prompt_hash,
+                        **market_metadata,
                     }
                 )
                 
@@ -513,3 +524,29 @@ class StrategyAgent(BaseAgent):
         if raw_chars == 0:
             return 0.0
         return round(len(prompt_text) / raw_chars, 3)
+
+    @staticmethod
+    def _build_market_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract trace-safe market metadata from MARKET_DATA event."""
+        depth = data.get("book_depth_top5")
+        try:
+            depth_json = json.dumps(depth, ensure_ascii=True) if depth is not None else None
+        except (TypeError, ValueError):
+            depth_json = None
+        return {
+            "funding_rate": data.get("funding_rate"),
+            "next_funding_time": data.get("next_funding_time"),
+            "open_interest": data.get("open_interest"),
+            "bid_ask_spread": data.get("bid_ask_spread"),
+            "book_imbalance": data.get("book_imbalance"),
+            "book_depth_top5": depth_json,
+        }
+
+    def _extract_model_version(self) -> Optional[str]:
+        """Best-effort pull model version from AI strategies."""
+        for strategy in self.strategies:
+            if isinstance(strategy, BaseAIStrategy):
+                model_version = getattr(strategy, "_last_model_version", None)
+                if model_version:
+                    return str(model_version)
+        return None

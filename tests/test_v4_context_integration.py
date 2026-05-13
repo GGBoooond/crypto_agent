@@ -3,14 +3,12 @@
 Covers:
 - KlineSummarizer produces compressed payload with last_n_compact + tape_signature
 - PromptBuilder injects MEMORY / USER / SKILL / REGIME / TRIGGER layers
-- Harness mode prompt is materially smaller than legacy mode
 - ai_hybrid_v4 EXECUTE / REJECT / ADJUST paths still emit signals with the
   expected shape when the LLM call is mocked
 """
 from __future__ import annotations
 
 import asyncio
-import math
 import os
 import sys
 import unittest
@@ -27,7 +25,6 @@ os.environ.setdefault("OKX_API_KEY", "test")
 os.environ.setdefault("OKX_SECRET_KEY", "test")
 os.environ.setdefault("OKX_PASSPHRASE", "test")
 os.environ.setdefault("DEEPSEEK_API_KEY", "test")
-os.environ.setdefault("AI_PROMPT_MODE", "harness")
 
 
 def _build_klines(num_bars: int = 120, seed_close: float = 0.115) -> list:
@@ -107,96 +104,113 @@ class TestPromptBuilder(unittest.TestCase):
             },
             regime_extra="change_pct=-0.5 volatility=0.4",
         )
-        self.assertEqual(len(messages), 2)
-        user_payload = messages[1]["content"]
-        for marker in [
-            "[USER]",
-            "[MEMORY]",
-            "[SKILLS_INDEX]",
-            "[SKILLS]",
-            "[REGIME]",
-            "[KLINE_SUMMARY]",
-            "[INDICATORS]",
-            "[RECENT_TAPE]",
-            "[TRIGGER]",
-            "[DECISION_SCHEMA]",
-        ]:
-            self.assertIn(marker, user_payload, f"missing layer marker: {marker}")
-        self.assertIn("OVERSOLD_BOUNCE", user_payload)
-        self.assertIn("Regime: ranging", user_payload)
+        self.assertEqual(len(messages), 3, "expected 3 messages for prefix caching")
+        static = messages[1]["content"]
+        dynamic = messages[2]["content"]
+        # 静态前缀应包含记忆/技能/上下文层
+        for marker in ["[USER]", "[MEMORY]", "[SKILLS_INDEX]", "[SKILLS]",
+                        "[CONTEXT]", "[DECISION_SCHEMA]"]:
+            self.assertIn(marker, static, f"missing static marker: {marker}")
+        # 动态后缀应包含行情/指标/触发层
+        for marker in ["[REGIME]", "[KLINE_SUMMARY]", "[INDICATORS]",
+                        "[RECENT_TAPE]", "[TRIGGER]"]:
+            self.assertIn(marker, dynamic, f"missing dynamic marker: {marker}")
+        self.assertIn("OVERSOLD_BOUNCE", dynamic)
+        self.assertIn("Regime: ranging", dynamic)
 
     def test_skill_filtering_by_regime(self):
         from harness.context import KlineSummarizer
 
         kline_summary = KlineSummarizer().summarize(_build_klines(), recent_n=5)
-        msg_ranging = self.builder.build_messages(
+        # 静态前缀 messages[1] 含 [SKILLS]，动态后缀 messages[2] 含 [REGIME]
+        static_ranging = self.builder.build_messages(
             symbol="DOGE/USDT",
             regime="ranging",
             kline_summary=kline_summary,
             position=None,
         )[1]["content"]
-        # Re-create builder so regime layer is rebuilt cleanly
+        dynamic_ranging = self.builder.build_messages(
+            symbol="DOGE/USDT",
+            regime="ranging",
+            kline_summary=kline_summary,
+            position=None,
+        )[2]["content"]
         self.builder.last_regime = None
-        msg_strong_up = self.builder.build_messages(
+        static_up = self.builder.build_messages(
             symbol="DOGE/USDT",
             regime="strong_trend_up",
             kline_summary=kline_summary,
             position=None,
         )[1]["content"]
+        dynamic_up = self.builder.build_messages(
+            symbol="DOGE/USDT",
+            regime="strong_trend_up",
+            kline_summary=kline_summary,
+            position=None,
+        )[2]["content"]
 
-        # Sanity: regime label flips, and the SKILLS section content depends
-        # on the regime when matching skills exist on disk.
-        self.assertIn("Regime: ranging", msg_ranging)
-        self.assertIn("Regime: strong_trend_up", msg_strong_up)
+        self.assertIn("Regime: ranging", dynamic_ranging)
+        self.assertIn("Regime: strong_trend_up", dynamic_up)
+        # 不同 regime 应选择不同的 skill，静态前缀不同
+        self.assertNotEqual(static_ranging, static_up)
 
+    def test_optional_user_instruction_and_extra_context_segments(self):
+        """USER_INSTRUCTION → 静态前缀；EXTRA_CONTEXT → 动态后缀。"""
+        from harness.context import KlineSummarizer
 
-class TestPromptCompression(unittest.TestCase):
-    def test_harness_prompt_smaller_than_legacy(self):
-        from strategies.ai_hybrid_v4_strategy import AIHybridV4Strategy
+        kline_summary = KlineSummarizer().summarize(_build_klines(), recent_n=5)
 
-        klines = _build_klines()
-        strategy = AIHybridV4Strategy()
-        df = strategy._calculate_indicators(klines)
-        triggered, reason, ctx = strategy._check_hard_triggers(df, position=None)
-        if not triggered:
-            # Force a trigger so the comparison is meaningful even on a flat
-            # synthetic series — fabricate the minimum trigger context fields.
-            ctx = {
-                "signal_dir": "LONG",
-                "trigger": "OVERSOLD_BOUNCE (synthetic)",
-                "rsi": 28.0,
-                "bb_pos": "Below Lower",
-                "trend": "BEARISH",
-                "macd_hist": -0.0001,
-                "atr": float(df.iloc[-1]["atr"]),
-            }
-
-        legacy_prompt = strategy._build_legacy_prompt(
-            symbol="DOGE/USDT", df=df, trigger_context=ctx, position=None
-        )
-
-        from harness.context import KlineSummarizer, PromptBuilder
-
-        summary = KlineSummarizer().summarize(klines, recent_n=5, indicators_df=df)
-        trigger_payload = strategy._build_trigger_payload_for_open(df, ctx)
-        builder = PromptBuilder(memory_dir=str(ROOT / "memory"))
-        harness_messages = builder.build_messages(
+        static_without = self.builder.build_messages(
             symbol="DOGE/USDT",
             regime="ranging",
-            kline_summary=summary,
+            kline_summary=kline_summary,
             position=None,
-            strategy_payload=trigger_payload,
-        )
-        harness_text = "\n".join(m["content"] for m in harness_messages)
+            strategy_payload={"mode": "open"},
+        )[1]["content"]
+        dynamic_without = self.builder.build_messages(
+            symbol="DOGE/USDT",
+            regime="ranging",
+            kline_summary=kline_summary,
+            position=None,
+            strategy_payload={"mode": "open"},
+        )[2]["content"]
+        self.assertNotIn("[USER_INSTRUCTION]", static_without)
+        self.assertNotIn("[EXTRA_CONTEXT]", dynamic_without)
 
-        # We do not require the harness prompt to be strictly smaller because
-        # the static MEMORY/USER/SKILL layers add fixed overhead. We DO require
-        # that the dynamic kline portion is materially compressed.
-        legacy_kline_chars = legacy_prompt.count("T-")
-        harness_kline_chars = harness_text.count("T-")
-        # Legacy keeps ten bars, harness keeps five — so harness must show
-        # fewer bars in the [RECENT_TAPE] layer.
-        self.assertLess(harness_kline_chars, legacy_kline_chars)
+        self.builder.last_regime = None
+        static_with = self.builder.build_messages(
+            symbol="DOGE/USDT",
+            regime="ranging",
+            kline_summary=kline_summary,
+            position=None,
+            strategy_payload={
+                "mode": "open",
+                "user_instruction": "高频原则: 60% 信心即开仓",
+                "extra_context": {
+                    "btc_trend": {"trend": "上涨", "change_24h": 1.5},
+                    "support": [0.12, 0.115],
+                },
+            },
+        )[1]["content"]
+        dynamic_with = self.builder.build_messages(
+            symbol="DOGE/USDT",
+            regime="ranging",
+            kline_summary=kline_summary,
+            position=None,
+            strategy_payload={
+                "mode": "open",
+                "user_instruction": "高频原则: 60% 信心即开仓",
+                "extra_context": {
+                    "btc_trend": {"trend": "上涨", "change_24h": 1.5},
+                    "support": [0.12, 0.115],
+                },
+            },
+        )[2]["content"]
+        self.assertIn("[USER_INSTRUCTION]", static_with)
+        self.assertIn("高频原则", static_with)
+        self.assertIn("[EXTRA_CONTEXT]", dynamic_with)
+        self.assertIn("btc_trend", dynamic_with)
+        self.assertIn("support", dynamic_with)
 
 
 class TestV4SignalExtraction(unittest.TestCase):
@@ -207,12 +221,12 @@ class TestV4SignalExtraction(unittest.TestCase):
 
         self.strategy = AIHybridV4Strategy()
         self.klines = _build_klines()
-        self.df = self.strategy._calculate_indicators(self.klines)
+        self.df = self.strategy._compute_indicators(self.klines)
 
     def test_extract_open_signal_execute(self):
         from core.message import SignalType
 
-        trigger = self.strategy._build_trigger_payload_for_open(
+        trigger = self.strategy._build_open_payload(
             self.df,
             {
                 "signal_dir": "LONG",
@@ -234,7 +248,7 @@ class TestV4SignalExtraction(unittest.TestCase):
         self.assertEqual(signal.metadata.get("tp_price"), trigger["ref_tp"])
 
     def test_extract_open_signal_reject(self):
-        trigger = self.strategy._build_trigger_payload_for_open(
+        trigger = self.strategy._build_open_payload(
             self.df,
             {
                 "signal_dir": "LONG",
@@ -256,7 +270,7 @@ class TestV4SignalExtraction(unittest.TestCase):
             "tp_price": float(self.df.iloc[-1]["close"]) * 1.01,
             "sl_price": float(self.df.iloc[-1]["close"]) * 0.97,
         }
-        trigger = self.strategy._build_trigger_payload_for_position(self.df, position)
+        trigger = self.strategy._build_position_payload(self.df, position)
         ai_decision = {
             "action": "ADJUST",
             "reason": "tighten stops",
@@ -296,35 +310,30 @@ class TestV4HarnessFlowMocked(unittest.TestCase):
                 ' "tp_price": 0.118, "sl_price": 0.114}'
             )
 
+        # Force a trigger by injecting last bar into oversold zone
+        df = strategy._compute_indicators(klines)
+        last_idx = df.index[-1]
+        df.loc[last_idx, "rsi"] = 25.0
+        df.loc[last_idx, "lower_bb"] = float(df.loc[last_idx, "close"]) * 1.05
+
         with patch.object(
             strategy.client.chat.completions, "create", side_effect=_fake_create
         ):
-            with patch(
-                "core.state_store.StateStore.add_ai_event", new=lambda self, e: asyncio.sleep(0)
-            ):
-                # Force a trigger by manually injecting last bar into oversold zone
-                df = strategy._calculate_indicators(klines)
-                last_idx = df.index[-1]
-                df.loc[last_idx, "rsi"] = 25.0
-                df.loc[last_idx, "lower_bb"] = float(df.loc[last_idx, "close"]) * 1.05
-
-                with patch.object(strategy, "_calculate_indicators", return_value=df):
-                    signal = asyncio.run(
-                        strategy.analyze(
-                            symbol="DOGE/USDT",
-                            klines=klines,
-                            market_data={"close": klines[-1]["close"]},
-                            position=None,
-                            context=None,
-                        )
+            with patch.object(strategy, "_compute_indicators", return_value=df):
+                signal = asyncio.run(
+                    strategy.analyze(
+                        symbol="DOGE/USDT",
+                        klines=klines,
+                        market_data={"close": klines[-1]["close"]},
+                        position=None,
+                        context=None,
                     )
+                )
 
-        # Either we got an EXECUTE signal or the trigger logic still rejected.
-        # In both cases the LLM usage should be tracked once a call happened.
-        if signal is not None:
-            self.assertIn("llm_usage", signal.metadata)
-            self.assertIn("prompt_messages", signal.metadata)
-            self.assertEqual(signal.metadata["llm_usage"]["total_tokens"], 380)
+        self.assertIsNotNone(signal)
+        self.assertIn("llm_usage", signal.metadata)
+        self.assertIn("prompt_messages", signal.metadata)
+        self.assertEqual(signal.metadata["llm_usage"]["total_tokens"], 380)
 
 
 if __name__ == "__main__":

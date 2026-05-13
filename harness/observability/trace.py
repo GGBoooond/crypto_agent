@@ -5,7 +5,7 @@ import uuid
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List
 
 
 class TraceRecorder:
@@ -17,6 +17,27 @@ class TraceRecorder:
         "prompt_tokens": "INTEGER",
         "completion_tokens": "INTEGER",
         "kline_compression_ratio": "REAL",
+        "funding_rate": "REAL",
+        "next_funding_time": "TEXT",
+        "open_interest": "REAL",
+        "bid_ask_spread": "REAL",
+        "book_imbalance": "REAL",
+        "book_depth_top5": "TEXT",
+        "model_id": "TEXT",
+        "model_version": "TEXT",
+        "prompt_hash": "TEXT",
+        "requested_price": "REAL",
+        "filled_price": "REAL",
+        "slippage_bps": "REAL",
+        "maker_or_taker": "TEXT",
+        "partial_fill_count": "INTEGER",
+        "fee_paid": "REAL",
+        "fee_currency": "TEXT",
+        "forward_return_5m": "REAL",
+        "forward_return_30m": "REAL",
+        "forward_return_4h": "REAL",
+        "btc_return_concurrent": "REAL",
+        "eth_return_concurrent": "REAL",
     }
 
     def __init__(self, db_path: str = "memory/trades.db"):
@@ -70,6 +91,10 @@ class TraceRecorder:
                 END
                 """
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_ts ON traces(timestamp)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_traces_stage_ts ON traces(stage, timestamp)"
+            )
 
     def _migrate_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(traces)").fetchall()}
@@ -99,39 +124,155 @@ class TraceRecorder:
         timestamp = payload.get("timestamp", now)
         if isinstance(timestamp, (datetime, date)):
             timestamp = timestamp.isoformat()
+        columns = [
+            "trace_id",
+            "timestamp",
+            "symbol",
+            "regime",
+            "skill_used",
+            "stage",
+            "llm_prompt",
+            "llm_response",
+            "verification_result",
+            "risk_decision",
+            "side",
+            "qty",
+            "entry_price",
+            "exit_price",
+            "pnl",
+            "holding_minutes",
+            "raw_payload",
+            "prompt_tokens",
+            "completion_tokens",
+            "kline_compression_ratio",
+            "funding_rate",
+            "next_funding_time",
+            "open_interest",
+            "bid_ask_spread",
+            "book_imbalance",
+            "book_depth_top5",
+            "model_id",
+            "model_version",
+            "prompt_hash",
+            "requested_price",
+            "filled_price",
+            "slippage_bps",
+            "maker_or_taker",
+            "partial_fill_count",
+            "fee_paid",
+            "fee_currency",
+            "forward_return_5m",
+            "forward_return_30m",
+            "forward_return_4h",
+            "btc_return_concurrent",
+            "eth_return_concurrent",
+        ]
+        values = (
+            trace_id,
+            timestamp,
+            payload.get("symbol"),
+            payload.get("regime"),
+            payload.get("skill_used"),
+            payload.get("stage"),
+            payload.get("llm_prompt"),
+            payload.get("llm_response"),
+            payload.get("verification_result"),
+            payload.get("risk_decision"),
+            payload.get("side"),
+            payload.get("qty"),
+            payload.get("entry_price"),
+            payload.get("exit_price"),
+            payload.get("pnl"),
+            payload.get("holding_minutes"),
+            json.dumps(payload, ensure_ascii=True, default=self._json_default),
+            payload.get("prompt_tokens"),
+            payload.get("completion_tokens"),
+            payload.get("kline_compression_ratio"),
+            payload.get("funding_rate"),
+            payload.get("next_funding_time"),
+            payload.get("open_interest"),
+            payload.get("bid_ask_spread"),
+            payload.get("book_imbalance"),
+            payload.get("book_depth_top5"),
+            payload.get("model_id"),
+            payload.get("model_version"),
+            payload.get("prompt_hash"),
+            payload.get("requested_price"),
+            payload.get("filled_price"),
+            payload.get("slippage_bps"),
+            payload.get("maker_or_taker"),
+            payload.get("partial_fill_count"),
+            payload.get("fee_paid"),
+            payload.get("fee_currency"),
+            payload.get("forward_return_5m"),
+            payload.get("forward_return_30m"),
+            payload.get("forward_return_4h"),
+            payload.get("btc_return_concurrent"),
+            payload.get("eth_return_concurrent"),
+        )
+        placeholders = ", ".join(["?"] * len(columns))
+        column_sql = ", ".join(columns)
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT OR REPLACE INTO traces ({column_sql}) VALUES ({placeholders})",
+                values,
+            )
+
+    def update_forward_returns(self, trace_id: str, returns: Dict[str, Any]) -> None:
+        """Update forward return columns for a trace row."""
+        if not trace_id:
+            return
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO traces (
-                    trace_id, timestamp, symbol, regime, skill_used, stage,
-                    llm_prompt, llm_response, verification_result, risk_decision,
-                    side, qty, entry_price, exit_price, pnl, holding_minutes,
-                    raw_payload, prompt_tokens, completion_tokens, kline_compression_ratio
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                UPDATE traces
+                SET
+                    forward_return_5m = COALESCE(?, forward_return_5m),
+                    forward_return_30m = COALESCE(?, forward_return_30m),
+                    forward_return_4h = COALESCE(?, forward_return_4h),
+                    btc_return_concurrent = COALESCE(?, btc_return_concurrent),
+                    eth_return_concurrent = COALESCE(?, eth_return_concurrent)
+                WHERE trace_id = ?
                 """,
                 (
+                    returns.get("forward_return_5m"),
+                    returns.get("forward_return_30m"),
+                    returns.get("forward_return_4h"),
+                    returns.get("btc_return_concurrent"),
+                    returns.get("eth_return_concurrent"),
                     trace_id,
-                    timestamp,
-                    payload.get("symbol"),
-                    payload.get("regime"),
-                    payload.get("skill_used"),
-                    payload.get("stage"),
-                    payload.get("llm_prompt"),
-                    payload.get("llm_response"),
-                    payload.get("verification_result"),
-                    payload.get("risk_decision"),
-                    payload.get("side"),
-                    payload.get("qty"),
-                    payload.get("entry_price"),
-                    payload.get("exit_price"),
-                    payload.get("pnl"),
-                    payload.get("holding_minutes"),
-                    json.dumps(payload, ensure_ascii=True, default=self._json_default),
-                    payload.get("prompt_tokens"),
-                    payload.get("completion_tokens"),
-                    payload.get("kline_compression_ratio"),
                 ),
             )
+
+    def query_pending_forward_returns(
+        self,
+        window: str,
+        before_ts: datetime,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Return traces that are ready but not backfilled for a window."""
+        window_column = {
+            "5m": "forward_return_5m",
+            "30m": "forward_return_30m",
+            "4h": "forward_return_4h",
+        }.get(window)
+        if window_column is None:
+            return []
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                SELECT trace_id, timestamp, symbol, side, entry_price
+                FROM traces
+                WHERE stage = 'order_filled'
+                  AND {window_column} IS NULL
+                  AND entry_price IS NOT NULL
+                  AND timestamp < ?
+                ORDER BY timestamp ASC
+                LIMIT ?
+                """,
+                (before_ts.isoformat(), limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     def search(self, query: str, limit: int = 20):
         with self._connect() as conn:

@@ -305,7 +305,13 @@ class PromptBuilder:
         regime_extra: Optional[str] = None,
         system_role_override: Optional[str] = None,
     ) -> List[Dict[str, str]]:
-        """Produce ready-to-send OpenAI-compatible messages list."""
+        """Produce ready-to-send OpenAI-compatible messages list.
+
+        返回 3 条消息（system + static-prefix user + dynamic-suffix user），
+        利用 DeepSeek / OpenAI 兼容实现的自动前缀缓存（Automatic Prefix Caching）。
+        静态前缀在 MEMORY/USER/SKILLS/regime/symbol 不变时字节完全一致，
+        服务端自动命中缓存，仅对动态后缀计费，可节省 50%+ prompt token。
+        """
         snapshot = self.rebuild_static_snapshot()
         self.update_regime_layer(regime, regime_extra)
         skills = self._select_relevant_skills(regime)
@@ -333,11 +339,30 @@ class PromptBuilder:
 
         position_text = self._format_position(position)
 
-        user_content = (
+        user_instruction = (strategy_payload or {}).get("user_instruction")
+        extra_context = (strategy_payload or {}).get("extra_context")
+        instruction_block = (
+            f"[USER_INSTRUCTION]\n{user_instruction}\n\n" if user_instruction else ""
+        )
+        extra_block = (
+            f"[EXTRA_CONTEXT]\n{self._format_extra_context(extra_context)}\n\n"
+            if extra_context else ""
+        )
+
+        # ── 静态前缀：仅在 MEMORY/USER/SKILL/symbol/regime 变更时变化 ──
+        # 保持此字符串在多次调用间字节一致，是命中前缀缓存的关键。
+        static_prefix = (
             f"[USER]\n{snapshot.user_memory or '(empty)'}\n\n"
             f"[MEMORY]\n{snapshot.system_memory or '(empty)'}\n\n"
             f"[SKILLS_INDEX]\n{snapshot.skills_index or '(empty)'}\n\n"
             f"[SKILLS]\n{skill_section}\n\n"
+            f"[CONTEXT]\nsymbol={symbol}\n\n"
+            f"[DECISION_SCHEMA]\n{decision_schema}\n\n"
+            f"{instruction_block}"
+        )
+
+        # ── 动态后缀：每轮根据行情 / 持仓 / 触发条件变化 ──
+        dynamic_suffix = (
             f"[REGIME]\n{self.regime_layer}\n\n"
             f"[KLINE_SUMMARY]\n"
             f"summary: {kline_summary.get('summary', 'n/a')}\n"
@@ -346,9 +371,8 @@ class PromptBuilder:
             f"[INDICATORS]\n{indicators_inline}\n\n"
             f"[RECENT_TAPE]\n{recent_tape}\n\n"
             f"[POSITION]\n{position_text}\n\n"
-            f"[CONTEXT]\nsymbol={symbol}\n\n"
+            f"{extra_block}"
             f"[TRIGGER]\n{trigger_text}\n\n"
-            f"[DECISION_SCHEMA]\n{decision_schema}\n\n"
             "Reply with the JSON only."
         )
 
@@ -357,7 +381,8 @@ class PromptBuilder:
                 "role": "system",
                 "content": system_role_override or snapshot.static_prompt,
             },
-            {"role": "user", "content": user_content},
+            {"role": "user", "content": static_prefix},
+            {"role": "user", "content": dynamic_suffix},
         ]
 
     @staticmethod
@@ -372,6 +397,32 @@ class PromptBuilder:
         if not items:
             return "position present (no detail)"
         return ", ".join(items)
+
+    @staticmethod
+    def _format_extra_context(extra: Any) -> str:
+        """Render extra_context (dict / list / scalar) as readable lines.
+
+        Lists become bullet rows; dicts become ``key: value`` lines so that
+        nested structures (e.g. ``btc_trend / support / resistance``) keep
+        their semantic shape inside the prompt.
+        """
+        if extra is None:
+            return ""
+        if isinstance(extra, dict):
+            lines: List[str] = []
+            for key, value in extra.items():
+                if isinstance(value, (list, tuple)):
+                    rendered = ", ".join(str(item) for item in value) or "(empty)"
+                    lines.append(f"{key}: [{rendered}]")
+                elif isinstance(value, dict):
+                    inner = ", ".join(f"{k}={v}" for k, v in value.items())
+                    lines.append(f"{key}: {{{inner}}}")
+                else:
+                    lines.append(f"{key}: {value}")
+            return "\n".join(lines) if lines else "(empty)"
+        if isinstance(extra, (list, tuple)):
+            return "\n".join(f"- {item}" for item in extra) or "(empty)"
+        return str(extra)
 
     @staticmethod
     def estimate_tokens(messages: List[Dict[str, str]]) -> int:

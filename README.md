@@ -49,7 +49,8 @@ crypto_agent/
 │   ├── context/             # K线摘要、regime 标签、prompt 构建
 │   ├── observability/       # 全链路追踪 (SQLite+FTS5) 与评估
 │   ├── hitl/                # 人工审批门 (Telegram 桩)
-│   └── lifecycle/           # 健康监控、checkpoint
+│   ├── lifecycle/           # 健康监控、checkpoint
+│   └── backtest/            # 回测引擎 MVP（CLI / 数据拉取 / 撮合 / 报告）
 ├── evolution/                # 自演进引擎
 │   ├── postmortem.py        # 复盘草案生成
 │   ├── skill_health.py      # 技能健康度统计
@@ -70,9 +71,11 @@ crypto_agent/
 │   └── technical.py         # RSI, MACD, BB 等
 ├── risk/                     # 风控模块 (兼容层 → harness/verification/policy_gate)
 │   └── risk_manager.py
-├── web/                      # Web 监控
+├── web/                      # Web 监控 + 回测可视化
 │   ├── app.py               # FastAPI 应用 (含路由和 WebSocket)
-│   └── static/index.html    # 前端页面
+│   ├── api/                 # 回测 REST/WS 路由
+│   ├── frontend/            # Vue3 + Vite 回测前端工程
+│   └── static/              # 静态产物 (含 / 与 /backtest)
 └── utils/                    # 工具模块
     ├── logger.py            # 日志配置
     └── helpers.py           # 辅助函数
@@ -122,6 +125,83 @@ python main.py
 ### 4. 访问监控面板
 
 打开浏览器访问: http://localhost:8888
+
+## 🧪 回测功能使用（MVP）
+
+### 快速命令
+
+```bash
+python -m harness.backtest \
+  --strategy ai_hybrid_v4 \
+  --start 2026-04-01 \
+  --end 2026-04-30 \
+  --symbol DOGE/USDT:USDT \
+  --llm-mode replay \
+  --initial-balance 10000 \
+  --output-dir reports/
+```
+
+### 参数说明
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `--strategy` | 是 | 策略名，如 `ai_hybrid_v4` |
+| `--start` / `--end` | 是 | 回测起止日期（ISO 格式） |
+| `--symbol` | 是 | 交易对，如 `DOGE/USDT:USDT` |
+| `--llm-mode` | 否 | `replay`（回放历史）或 `rerun`（真实调用 LLM） |
+| `--initial-balance` | 否 | 初始资金（USDT） |
+| `--timeframe` | 否 | K 线周期，默认 `1m` |
+| `--output-dir` | 否 | 报告输出目录，默认 `reports` |
+| `--fidelity-check` | 否 | 开启后对比实盘窗口偏差，超阈值返回失败码 |
+
+### 输出结果
+
+- `backtest_<run_id>.json`：完整回测指标（收益、回撤、Sharpe 等）
+- `backtest_<run_id>_trades.csv`：逐笔交易记录
+
+### 使用建议
+
+- 先用 `--llm-mode replay` 做基线复盘，再切 `rerun` 观察当前模型漂移
+- 实盘前至少做 30 天窗口回测，并关注最大回撤与 profit factor
+- 首次使用请确认 `.env` 中仍为 `TEST_MODE=true`
+
+## 🖥️ Backtest 可视化界面
+
+### 访问入口
+
+- 实时监控：`http://localhost:8888/`
+- 回测中心：`http://localhost:8888/backtest`
+
+### 回测中心能力
+
+- 可视化创建回测任务（策略、时间区间、symbol、LLM 模式、初始资金、timeframe）
+- 实时进度跟踪（WebSocket 推送进度、步数、ETA）
+- 回测报告总览列表（状态、胜率、Sharpe、最大回撤）
+- 详情页查看（KPI 卡片、资金曲线+回撤、成交明细、原始 JSON）
+- 一键下载 `trades.csv` 与删除历史回测
+
+### 前端开发与构建
+
+```bash
+# 1) 启动后端
+python main.py
+
+# 2) 新开终端，启动前端开发模式
+cd web/frontend
+npm install
+npm run dev
+```
+
+Vite 已配置代理到 `http://127.0.0.1:8888`，浏览器访问 `http://localhost:5173/backtest/` 即可联调。
+
+生产构建：
+
+```bash
+cd web/frontend
+npm run build
+```
+
+构建产物会输出到 `web/static/backtest/`，由 FastAPI 在 `/backtest` 路径托管。
 
 ## 🏗️ 架构说明
 

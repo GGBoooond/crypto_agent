@@ -20,15 +20,24 @@ class Settings(BaseSettings):
     okx_passphrase: str = Field(default="", alias="OKX_PASSPHRASE")
     okx_account_type: str = Field(default="swap", alias="OKX_ACCOUNT_TYPE")
     
-    # ==================== AI配置 ====================
+    # ==================== AI / LLM 配置 ====================
+    # ---- DeepSeek 旧字段（保留向下兼容；当未填新字段时作为默认值）----
     deepseek_api_key: str = Field(default="", alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field(default="https://api.deepseek.com", alias="DEEPSEEK_BASE_URL")
     ai_model: str = Field(default="deepseek-chat", alias="AI_MODEL")
     ai_temperature: float = Field(default=0.3, alias="AI_TEMPERATURE")
     llm_daily_token_limit: int = Field(default=200000, alias="LLM_DAILY_TOKEN_LIMIT")
     llm_per_call_token_limit: int = Field(default=4000, alias="LLM_PER_CALL_TOKEN_LIMIT")
-    # AI prompt 构建模式: harness(走 PromptBuilder) | legacy(策略内自建 prompt)
-    ai_prompt_mode: str = Field(default="harness", alias="AI_PROMPT_MODE")
+
+    # ---- 通用 LLM Provider 配置（推荐使用）----
+    # provider: deepseek | openai | openai_compatible
+    # 任意 OpenAI 协议兼容服务（含 ChatGPT/通义/智谱/Azure/自部署 vLLM 等）都用 openai_compatible
+    llm_provider: str = Field(default="deepseek", alias="LLM_PROVIDER")
+    llm_api_key: str = Field(default="", alias="LLM_API_KEY")
+    llm_base_url: str = Field(default="", alias="LLM_BASE_URL")
+    llm_model: str = Field(default="", alias="LLM_MODEL")
+    # DeepSeek V4 系列默认开启思维链；对结构化 JSON 输出场景关闭可显著降低 token 消耗与延迟
+    llm_thinking_enabled: bool = Field(default=False, alias="LLM_THINKING_ENABLED")
     
     # ==================== 交易配置 ====================
     trading_symbol: str = Field(default="DOGE/USDT:USDT", alias="TRADING_SYMBOL")
@@ -76,6 +85,23 @@ class Settings(BaseSettings):
     def get_enabled_strategies(self) -> List[str]:
         """获取启用的策略列表"""
         return [s.strip() for s in self.enabled_strategies.split(",") if s.strip()]
+
+    def get_llm_provider(self) -> str:
+        return (self.llm_provider or "deepseek").strip().lower()
+
+    def get_llm_api_key(self) -> str:
+        return self.llm_api_key or self.deepseek_api_key
+
+    def get_llm_base_url(self) -> str:
+        if self.llm_base_url:
+            return self.llm_base_url
+        provider = self.get_llm_provider()
+        if provider == "openai":
+            return "https://api.openai.com/v1"
+        return self.deepseek_base_url
+
+    def get_llm_model(self) -> str:
+        return self.llm_model or self.ai_model
     
     def get_strategy_config(self, strategy_name: str) -> Dict[str, Any]:
         """获取特定策略的配置"""
