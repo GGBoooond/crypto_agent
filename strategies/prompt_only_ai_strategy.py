@@ -178,8 +178,12 @@ class PromptOnlyAIStrategy(BaseAIStrategy):
             return None
 
         confidence = self._map_confidence(confidence_str)
-        stop_loss = self._safe_float(ai_decision.get("stop_loss"))
-        take_profit = self._safe_float(ai_decision.get("take_profit"))
+        stop_loss = self._safe_float(
+            ai_decision.get("stop_loss", ai_decision.get("sl_price"))
+        )
+        take_profit = self._safe_float(
+            ai_decision.get("take_profit", ai_decision.get("tp_price"))
+        )
 
         return Signal(
             signal_type=signal_type,
@@ -201,9 +205,9 @@ class PromptOnlyAIStrategy(BaseAIStrategy):
     def _map_action_to_signal_type(
         action: str, position: Optional[Dict[str, Any]]
     ) -> Optional[SignalType]:
-        if action == "BUY":
+        if action in ("BUY", "EXECUTE_LONG"):
             return SignalType.BUY
-        if action == "SELL":
+        if action in ("SELL", "EXECUTE_SHORT"):
             return SignalType.SELL
         if action == "CLOSE":
             if position and str(position.get("side", "")).lower() == "short":

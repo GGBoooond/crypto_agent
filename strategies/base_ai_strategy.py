@@ -560,6 +560,8 @@ class BaseAIStrategy(BaseStrategy):
         )
         if signal is not None:
             metadata = signal.metadata or {}
+            metadata.setdefault("skill_used", self._format_skill_ids(ctx))
+            self._merge_decision_metadata(metadata, decision)
             metadata.setdefault("llm_usage", usage)
             metadata.setdefault("regime", ctx.regime)
             kline_summary = ctx.kline_summary or {}
@@ -574,6 +576,25 @@ class BaseAIStrategy(BaseStrategy):
             metadata.setdefault("prompt_messages", messages)
             signal.metadata = metadata
         return signal
+
+    @staticmethod
+    def _format_skill_ids(context: StrategyContext) -> Optional[str]:
+        builder = context.prompt_builder
+        if builder is None:
+            return None
+        skill_ids = getattr(builder, "last_injected_skill_ids", [])
+        if not skill_ids:
+            return None
+        return ",".join(str(skill_id) for skill_id in skill_ids)
+
+    @staticmethod
+    def _merge_decision_metadata(
+        metadata: Dict[str, Any], decision: Dict[str, Any]
+    ) -> None:
+        for key in ("fine_regime", "key_observations", "confidence_breakdown"):
+            value = decision.get(key)
+            if value is not None:
+                metadata.setdefault(key, value)
 
     @staticmethod
     def _extract_json(text: str) -> Optional[Dict[str, Any]]:

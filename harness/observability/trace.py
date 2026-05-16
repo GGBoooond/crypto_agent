@@ -38,6 +38,7 @@ class TraceRecorder:
         "forward_return_4h": "REAL",
         "btc_return_concurrent": "REAL",
         "eth_return_concurrent": "REAL",
+        "fine_regime": "TEXT",
     }
 
     def __init__(self, db_path: str = "memory/trades.db"):
@@ -166,6 +167,7 @@ class TraceRecorder:
             "forward_return_4h",
             "btc_return_concurrent",
             "eth_return_concurrent",
+            "fine_regime",
         ]
         values = (
             trace_id,
@@ -209,6 +211,7 @@ class TraceRecorder:
             payload.get("forward_return_4h"),
             payload.get("btc_return_concurrent"),
             payload.get("eth_return_concurrent"),
+            payload.get("fine_regime"),
         )
         placeholders = ", ".join(["?"] * len(columns))
         column_sql = ", ".join(columns)

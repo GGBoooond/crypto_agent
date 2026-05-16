@@ -102,14 +102,15 @@ class StrategyAgent(BaseAgent):
             if symbol in self.state_store.positions:
                 position = self.state_store.positions[symbol].to_dict()
             
-            regime_enum, regime_metrics = self.regime_tagger.detect_with_metrics(klines)
-            regime = regime_enum.value
-            regime_extra = (
-                f"change_pct={regime_metrics.change_pct} "
-                f"volatility={regime_metrics.volatility} "
-                f"sample_size={regime_metrics.sample_size}"
+            indicators_df = self._compute_shared_indicators(klines)
+            regime_enum, regime_metrics = self.regime_tagger.detect_with_metrics(
+                klines, indicators_df=indicators_df
             )
-            kline_summary = self.kline_summarizer.summarize(klines)
+            regime = regime_enum.value
+            regime_extra = self._build_regime_extra(regime_metrics)
+            kline_summary = self.kline_summarizer.summarize(
+                klines, indicators_df=indicators_df
+            )
             prompt = self.prompt_builder.build(
                 symbol, regime, kline_summary, position, regime_extra=regime_extra
             )
@@ -163,6 +164,7 @@ class StrategyAgent(BaseAgent):
                             "llm_prompt": prompt,
                             "llm_response": str(final_signal.to_dict()),
                             "regime": regime,
+                            "fine_regime": final_signal.metadata.get("fine_regime"),
                         }
                     )
                     return
@@ -183,6 +185,7 @@ class StrategyAgent(BaseAgent):
                             "llm_prompt": prompt,
                             "llm_response": str(schema_result.signal.to_dict()),
                             "regime": regime,
+                            "fine_regime": schema_result.signal.metadata.get("fine_regime"),
                         }
                     )
                     return
@@ -205,6 +208,7 @@ class StrategyAgent(BaseAgent):
                             "llm_prompt": prompt,
                             "llm_response": str(schema_result.signal.to_dict()),
                             "regime": regime,
+                            "fine_regime": schema_result.signal.metadata.get("fine_regime"),
                         }
                     )
                     return
@@ -258,6 +262,7 @@ class StrategyAgent(BaseAgent):
                         "side": final_signal.signal_type.value,
                         "qty": final_signal.amount,
                         "skill_used": final_signal.metadata.get("skill_used"),
+                        "fine_regime": final_signal.metadata.get("fine_regime"),
                         "prompt_tokens": llm_usage.get("prompt_tokens"),
                         "completion_tokens": llm_usage.get("completion_tokens"),
                         "kline_compression_ratio": kline_compression_ratio,
@@ -462,6 +467,30 @@ class StrategyAgent(BaseAgent):
                 strategy.prompt_builder = self.prompt_builder
                 strategy.kline_summarizer = self.kline_summarizer
                 strategy.budget_manager = self.budget_manager
+
+    def _compute_shared_indicators(self, klines: List[Dict[str, Any]]) -> Optional[Any]:
+        """Use the first AI strategy's indicator set for shared context layers."""
+        for strategy in self.strategies:
+            if not isinstance(strategy, BaseAIStrategy):
+                continue
+            try:
+                return strategy._compute_indicators(klines)
+            except Exception as exc:
+                logger.debug(f"共享指标计算失败({strategy.name}): {exc}")
+                return None
+        return None
+
+    @staticmethod
+    def _build_regime_extra(regime_metrics: Any) -> str:
+        return (
+            f"change_pct={regime_metrics.change_pct} "
+            f"volatility={regime_metrics.volatility} "
+            f"sample_size={regime_metrics.sample_size} "
+            f"atr_rank={regime_metrics.atr_rank} "
+            f"adx={regime_metrics.adx} "
+            f"bb_width_rank={regime_metrics.bb_width_rank} "
+            f"volume_price_corr={regime_metrics.volume_price_corr}"
+        )
 
     async def _invoke_analyze(
         self,

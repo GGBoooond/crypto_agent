@@ -30,8 +30,11 @@ from .base_ai_strategy import BaseAIStrategy
 
 _OPEN_DECISION_SCHEMA = (
     '{\n'
-    '  "action": "EXECUTE | REJECT",\n'
+    '  "action": "EXECUTE_LONG | EXECUTE_SHORT | WAIT | REJECT | EXECUTE | REJECT",\n'
+    '  "fine_regime": "string",\n'
     '  "confidence": "HIGH | MEDIUM | LOW",\n'
+    '  "confidence_breakdown": {"trend": 0.0, "momentum": 0.0, "support_resistance": 0.0},\n'
+    '  "key_observations": ["string"],\n'
     '  "reason": "string",\n'
     '  "tp_price": number,\n'
     '  "sl_price": number\n'
@@ -59,10 +62,7 @@ class AIHybridV4Strategy(BaseAIStrategy):
     POSITION_CHECK_MAX_TOKENS = 600
 
     # ---- Prompt contract ----
-    SYSTEM_ROLE_OVERRIDE = (
-        "你是专业的加密货币交易风控官。只输出 JSON，"
-        "价格精度保持5位小数。严格遵循 [DECISION_SCHEMA]。"
-    )
+    SYSTEM_ROLE_OVERRIDE = "你是专业的加密货币交易风控官。只输出 JSON，严格遵循 [DECISION_SCHEMA]。"
 
     def __init__(self, weight: float = 1.0):
         super().__init__(name="AIHybridV4Strategy", weight=weight)
@@ -234,6 +234,13 @@ class AIHybridV4Strategy(BaseAIStrategy):
             "ref_sl": round(ref_sl, 8),
             "current_price": round(current_price, 8),
             "decision_schema": _OPEN_DECISION_SCHEMA,
+            "role_constraints": {
+                "persona": "风控官",
+                "risk_appetite": "balanced",
+                "target_pnl_ratio": 1.5,
+                "max_loss_pct": self.max_loss,
+                "holding_horizon": "scalping",
+            },
         }
 
     def _build_position_payload(
@@ -269,6 +276,13 @@ class AIHybridV4Strategy(BaseAIStrategy):
             "existing_tp": existing_tp,
             "existing_sl": existing_sl,
             "decision_schema": _POSITION_DECISION_SCHEMA,
+            "role_constraints": {
+                "persona": "风控官",
+                "risk_appetite": "balanced",
+                "target_pnl_ratio": 1.5,
+                "max_loss_pct": self.max_loss,
+                "holding_horizon": "scalping",
+            },
         }
 
     # ------------------------------------------------------------------
@@ -302,13 +316,15 @@ class AIHybridV4Strategy(BaseAIStrategy):
         confidence_str = str(ai_decision.get('confidence', 'LOW')).upper()
         ai_reason = ai_decision.get('reason', 'AI无理由')
 
-        if action != "EXECUTE":
+        signal_dir = self._resolve_action_direction(
+            action, str(trigger_payload.get("signal_dir", "LONG"))
+        )
+        if signal_dir is None:
             logger.info(f"[{self.name}] AI拒绝信号: {ai_reason}")
             return None
 
         current_price = float(trigger_payload.get("current_price") or 0)
         atr = float(trigger_payload.get("indicators", {}).get("atr") or 0)
-        signal_dir = trigger_payload.get("signal_dir", "LONG")
 
         tp_price = ai_decision.get('tp_price')
         sl_price = ai_decision.get('sl_price')
@@ -443,3 +459,13 @@ class AIHybridV4Strategy(BaseAIStrategy):
             'MEDIUM': Confidence.MEDIUM,
             'LOW': Confidence.LOW,
         }.get(confidence_str, Confidence.LOW)
+
+    @staticmethod
+    def _resolve_action_direction(action: str, fallback_dir: str) -> Optional[str]:
+        if action == "EXECUTE_LONG":
+            return "LONG"
+        if action == "EXECUTE_SHORT":
+            return "SHORT"
+        if action == "EXECUTE":
+            return fallback_dir
+        return None

@@ -5,6 +5,8 @@ version: 0.1.0
 metadata:
   quant:
     regime: [ranging]
+    trigger_types: [oversold_bounce, overbought_dump]
+    tape_signatures: ["连阴", "连阳", "无明显连阴连阳"]
     sample_size: 0
 ---
 

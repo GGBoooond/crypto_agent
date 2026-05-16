@@ -30,12 +30,17 @@ from .prompt_only_ai_strategy import PromptOnlyAIStrategy
 
 _DECISION_SCHEMA = (
     '{\n'
-    '  "action": "BUY | SELL | HOLD | CLOSE",\n'
+    '  "action": "EXECUTE_LONG | EXECUTE_SHORT | WAIT | REJECT | BUY | SELL | HOLD | CLOSE",\n'
+    '  "fine_regime": "string",\n'
     '  "confidence": "HIGH | MEDIUM | LOW",\n'
+    '  "confidence_breakdown": {"trend": 0.0, "momentum": 0.0, "support_resistance": 0.0},\n'
+    '  "key_observations": ["string"],\n'
     '  "reason": "格式: [策略] + [信号依据]",\n'
     '  "entry_price": number,\n'
     '  "stop_loss": number,\n'
-    '  "take_profit": number\n'
+    '  "take_profit": number,\n'
+    '  "sl_price": number,\n'
+    '  "tp_price": number\n'
     '}'
 )
 
@@ -71,10 +76,7 @@ class AIScalpingStrategy(PromptOnlyAIStrategy):
     TEMPERATURE = 0.3
 
     # ---- Prompt contract ----
-    SYSTEM_ROLE_OVERRIDE = (
-        "你是一个顶级高频量化交易员(IQ 160)，擅长剥头皮策略(Scalping)。"
-        "任务是利用微观市场结构和技术指标捕捉短线利润(0.3%-1.0%)。只输出 JSON。"
-    )
+    SYSTEM_ROLE_OVERRIDE = "你是一个擅长剥头皮策略的高频量化交易员。只输出 JSON。"
     DECISION_SCHEMA = _DECISION_SCHEMA
     USER_INSTRUCTION = _USER_INSTRUCTION
 
@@ -84,6 +86,25 @@ class AIScalpingStrategy(PromptOnlyAIStrategy):
         self.min_profit = config.get("min_profit", 0.3)
         self.max_loss = config.get("max_loss", 0.5)
         self.hold_minutes = config.get("hold_minutes", 10)
+
+    async def _collect_extra_payload(
+        self,
+        *,
+        symbol: str,
+        klines: List[Dict[str, Any]],
+        market_data: Dict[str, Any],
+        position: Optional[Dict[str, Any]],
+        context: Optional[StrategyContext],
+    ) -> Dict[str, Any]:
+        return {
+            "role_constraints": {
+                "persona": "剥头皮交易员",
+                "risk_appetite": "aggressive",
+                "target_pnl_ratio": max(self.min_profit / self.max_loss, 1.0),
+                "max_loss_pct": self.max_loss,
+                "holding_horizon": "scalping",
+            }
+        }
 
     # ------------------------------------------------------------------
     # Indicators

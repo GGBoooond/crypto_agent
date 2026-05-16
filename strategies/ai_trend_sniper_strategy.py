@@ -36,25 +36,18 @@ from .base_ai_strategy import BaseAIStrategy
 
 _DECISION_SCHEMA = (
     '{\n'
-    '  "action": "EXECUTE | REJECT",\n'
-    '  "confidence": "HIGH | MEDIUM",\n'
+    '  "action": "EXECUTE_LONG | EXECUTE_SHORT | WAIT | REJECT | EXECUTE | REJECT",\n'
+    '  "fine_regime": "string",\n'
+    '  "confidence": "HIGH | MEDIUM | LOW",\n'
+    '  "confidence_breakdown": {"trend": 0.0, "momentum": 0.0, "support_resistance": 0.0},\n'
+    '  "key_observations": ["string"],\n'
     '  "reason": "string",\n'
     '  "tp_price": number,\n'
     '  "sl_price": number\n'
     '}'
 )
 
-_SYSTEM_ROLE = (
-    "你是一名传奇的波段交易员(Swing Trader)，智商极高，风格稳健。"
-    "座右铭: 弱水三千，只取一瓢。只在胜率极高(>80%)且盈亏比极佳(>1:2)时出手。\n"
-    "## 核心规则\n"
-    "1. 目标利润必须超过 3%；当前波动率不足以支撑则直接 REJECT。\n"
-    "2. 止损必须宽，扛得住常规震荡，不能被插针扫掉。\n"
-    "3. 入场确认: 回调信号需止跌证据；突破信号需巨量(RVol>2.0) + 实体饱满。\n"
-    "4. K 线杂乱无章 / 长上影长下影交替 = 主力分歧，必须 REJECT。\n"
-    "5. 逆大盘趋势的信号需格外谨慎。\n"
-    "只输出 JSON，严格遵循 [DECISION_SCHEMA]。"
-)
+_SYSTEM_ROLE = "你是一名风格稳健的波段交易员。只输出 JSON，严格遵循 [DECISION_SCHEMA]。"
 
 # Trailing stop 配置：作为模块常量便于单测调参
 _TRAIL_ATR_MULT = 2.5         # 追踪距离: 2.5 倍 ATR
@@ -373,6 +366,13 @@ class AITrendSniperStrategy(BaseAIStrategy):
             "ref_tp": round(ref_tp, 8),
             "ref_sl": round(ref_sl, 8),
             "decision_schema": _DECISION_SCHEMA,
+            "role_constraints": {
+                "persona": "趋势猎手",
+                "risk_appetite": "conservative",
+                "target_pnl_ratio": 2.0,
+                "max_loss_pct": 1.5,
+                "holding_horizon": "trend",
+            },
         }
         if extra:
             payload.update(extra)
@@ -396,7 +396,10 @@ class AITrendSniperStrategy(BaseAIStrategy):
             return None
 
         action = str(ai_decision.get('action', 'REJECT')).upper()
-        if action != "EXECUTE":
+        signal_dir = self._resolve_action_direction(
+            action, str(trigger_payload.get("signal_dir", "LONG"))
+        )
+        if signal_dir is None:
             logger.info(f"[{self.name}] AI 放弃机会: {ai_decision.get('reason')}")
             return None
 
@@ -420,7 +423,6 @@ class AITrendSniperStrategy(BaseAIStrategy):
             )
             return None
 
-        signal_dir = trigger_payload.get("signal_dir", "LONG")
         signal_type = SignalType.BUY if signal_dir == "LONG" else SignalType.SELL
 
         signal = Signal(
@@ -510,6 +512,16 @@ class AITrendSniperStrategy(BaseAIStrategy):
         if signal_dir == "LONG":
             return current_price + tp_dist, current_price - sl_dist
         return current_price - tp_dist, current_price + sl_dist
+
+    @staticmethod
+    def _resolve_action_direction(action: str, fallback_dir: str) -> Optional[str]:
+        if action == "EXECUTE_LONG":
+            return "LONG"
+        if action == "EXECUTE_SHORT":
+            return "SHORT"
+        if action == "EXECUTE":
+            return fallback_dir
+        return None
 
     def _find_support_resistance(
         self, df: pd.DataFrame, n: int = 50

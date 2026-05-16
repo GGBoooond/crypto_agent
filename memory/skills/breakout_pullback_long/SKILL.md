@@ -5,6 +5,8 @@ version: 0.1.0
 metadata:
   quant:
     regime: [strong_trend_up]
+    trigger_types: [bullish_pullback, bullish_power_breakout, volatility_breakout_up]
+    tape_signatures: ["连阳", "放量突破后回踩"]
     sample_size: 0
 ---
 
