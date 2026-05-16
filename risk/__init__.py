@@ -1,4 +1,4 @@
 """风控模块"""
-from .risk_manager import RiskManager, RiskDecision
+from .risk_manager import RiskManager, RiskDecision, RiskCheckResult
 
-__all__ = ['RiskManager', 'RiskDecision']
+__all__ = ['RiskManager', 'RiskDecision', 'RiskCheckResult']

@@ -54,6 +54,16 @@ class OKXExchange(BaseExchange):
         if remaining > 0:
             return "open"
         return "open"
+
+    @staticmethod
+    def _safe_ms_to_iso(ms: Any) -> Optional[str]:
+        """Convert exchange millisecond timestamp to ISO string."""
+        if ms is None:
+            return None
+        try:
+            return datetime.utcfromtimestamp(float(ms) / 1000).isoformat()
+        except (TypeError, ValueError):
+            return None
     
     async def initialize(self) -> bool:
         """初始化交易所连接"""
@@ -123,16 +133,77 @@ class OKXExchange(BaseExchange):
         except Exception as e:
             logger.error(f"获取行情失败: {e}")
             return {}
+
+    async def fetch_funding_rate(self, symbol: str) -> Dict[str, Any]:
+        """获取资金费率信息。"""
+        if self.test_mode:
+            return {
+                "funding_rate": 0.0,
+                "next_funding_time": datetime.utcnow().isoformat(),
+            }
+        try:
+            funding = await self.exchange.fetch_funding_rate(symbol)
+            return {
+                "funding_rate": self._to_float(funding.get("fundingRate"), 0.0),
+                "next_funding_time": self._safe_ms_to_iso(funding.get("nextFundingTimestamp")),
+            }
+        except Exception as e:
+            logger.error(f"获取资金费率失败: {e}")
+            return {"funding_rate": 0.0, "next_funding_time": None}
+
+    async def fetch_open_interest(self, symbol: str) -> float:
+        """获取未平仓量。"""
+        if self.test_mode:
+            return 0.0
+        try:
+            oi_data = await self.exchange.fetch_open_interest(symbol)
+            return self._to_float(oi_data.get("openInterestAmount"), 0.0)
+        except Exception as e:
+            logger.error(f"获取未平仓量失败: {e}")
+            return 0.0
+
+    async def fetch_order_book_top(self, symbol: str, depth: int = 5) -> Dict[str, Any]:
+        """获取盘口顶部深度并计算 spread / imbalance。"""
+        if self.test_mode:
+            return {"spread": None, "imbalance": 0.0, "top5": []}
+        try:
+            order_book = await self.exchange.fetch_order_book(symbol, limit=depth)
+            bids = order_book.get("bids", [])[:depth]
+            asks = order_book.get("asks", [])[:depth]
+            if not bids or not asks:
+                return {"spread": None, "imbalance": 0.0, "top5": []}
+
+            best_bid = self._to_float(bids[0][0], 0.0)
+            best_ask = self._to_float(asks[0][0], 0.0)
+            mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0.0
+            spread_bps = ((best_ask - best_bid) / mid) * 10000 if mid > 0 else None
+
+            bid_size = sum(self._to_float(level[1], 0.0) for level in bids)
+            ask_size = sum(self._to_float(level[1], 0.0) for level in asks)
+            denominator = bid_size + ask_size
+            imbalance = ((bid_size - ask_size) / denominator) if denominator > 0 else 0.0
+
+            top_levels: List[List[float]] = []
+            for bid in bids:
+                top_levels.append([self._to_float(bid[0], 0.0), self._to_float(bid[1], 0.0)])
+            for ask in asks:
+                top_levels.append([self._to_float(ask[0], 0.0), self._to_float(ask[1], 0.0)])
+
+            return {"spread": spread_bps, "imbalance": imbalance, "top5": top_levels}
+        except Exception as e:
+            logger.error(f"获取盘口失败: {e}")
+            return {"spread": None, "imbalance": 0.0, "top5": []}
     
     async def fetch_ohlcv(
         self, 
         symbol: str, 
         timeframe: str, 
-        limit: int = 100
+        limit: int = 100,
+        since: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """获取K线数据"""
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
             
             result = []
             for candle in ohlcv:

@@ -152,6 +152,32 @@ class MarketAgent(BaseAgent):
             # 行情
             ticker = await self.exchange.fetch_ticker(self.symbol)
             await self.state_store.update_market_data(self.symbol, ticker)
+
+            # 盘口/资金费率/未平仓量（并发抓取，不阻塞主流程）
+            funding_rate = None
+            next_funding_time = None
+            open_interest = None
+            bid_ask_spread = None
+            book_imbalance = None
+            book_depth_top5 = None
+            try:
+                funding, oi, book = await asyncio.gather(
+                    self.exchange.fetch_funding_rate(self.symbol),
+                    self.exchange.fetch_open_interest(self.symbol),
+                    self.exchange.fetch_order_book_top(self.symbol, depth=5),
+                    return_exceptions=True,
+                )
+                if isinstance(funding, dict):
+                    funding_rate = funding.get("funding_rate")
+                    next_funding_time = funding.get("next_funding_time")
+                if not isinstance(oi, Exception):
+                    open_interest = oi
+                if isinstance(book, dict):
+                    bid_ask_spread = book.get("spread")
+                    book_imbalance = book.get("imbalance")
+                    book_depth_top5 = book.get("top5")
+            except Exception as e:
+                logger.debug(f"扩展行情抓取异常: {e}")
             
             # 持仓
             try:
@@ -181,7 +207,7 @@ class MarketAgent(BaseAgent):
                             'reason': 'TP/SL triggered or manual close',
                             'cleanup_algo_orders': True
                         })
-                    await self.state_store.update_position(None)
+                    await self.state_store.update_position(None, symbol=self.symbol)
             except Exception as e:
                 logger.debug(f"获取持仓异常: {e}")
             
@@ -197,7 +223,13 @@ class MarketAgent(BaseAgent):
                 'symbol': self.symbol,
                 'klines': klines,
                 'ticker': ticker,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                'funding_rate': funding_rate,
+                'next_funding_time': next_funding_time,
+                'open_interest': open_interest,
+                'bid_ask_spread': bid_ask_spread,
+                'book_imbalance': book_imbalance,
+                'book_depth_top5': book_depth_top5,
             })
             
             self._last_success = datetime.now()

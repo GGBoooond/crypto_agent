@@ -10,6 +10,7 @@ from loguru import logger
 from core.state_store import StateStore
 from core.orchestrator import Orchestrator
 from config import settings
+from web.api.backtest import register_backtest_routes
 
 
 class ConnectionManager:
@@ -59,6 +60,9 @@ def create_app(orchestrator: Optional[Orchestrator] = None) -> FastAPI:
     static_path = Path(__file__).parent / "static"
     if static_path.exists():
         app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+    backtest_static_path = static_path / "backtest"
+    if backtest_static_path.exists():
+        app.mount("/backtest", StaticFiles(directory=str(backtest_static_path), html=True), name="backtest")
     
     @app.get("/", response_class=HTMLResponse)
     async def index():
@@ -188,6 +192,8 @@ def create_app(orchestrator: Optional[Orchestrator] = None) -> FastAPI:
         except Exception as e:
             logger.error(f"WebSocket错误: {e}")
             manager.disconnect(websocket)
+
+    register_backtest_routes(app)
     
     return app
 

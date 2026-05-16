@@ -9,6 +9,9 @@ from core.message import Message, MessageType, Signal, SignalType
 from core.state_store import Trade, Position
 from exchange import OKXExchange
 from config import settings
+from harness.hitl import TelegramApprovalGate
+from harness.observability import TraceRecorder
+from harness.lifecycle import HealthMonitor, CheckpointStore
 
 
 class ExecutorAgent(BaseAgent):
@@ -27,6 +30,10 @@ class ExecutorAgent(BaseAgent):
         self._pending_orders = {}
         # 记录每个symbol的止盈止损订单ID
         self._tp_sl_orders: Dict[str, Dict[str, str]] = {}
+        self.approval_gate = TelegramApprovalGate(enabled=False)
+        self.trace = TraceRecorder()
+        self.health = HealthMonitor(timeout_seconds=120)
+        self.checkpoint = CheckpointStore()
     
     def _register_handlers(self):
         """注册消息处理器"""
@@ -86,8 +93,31 @@ class ExecutorAgent(BaseAgent):
             current_price = data['current_price']
             is_modified = data.get('modified', False)
             is_risk_close = data.get('risk_close', False)
+            trace_id = data.get("trace_id")
             
             signal = Signal.from_dict(signal_data)
+            account_balance = float(self.state_store.balance.get("USDT", 0))
+            approval = await self.approval_gate.request(
+                {
+                    "amount": signal.amount,
+                    "current_price": current_price,
+                    "signal_type": signal.signal_type.value,
+                },
+                account_balance,
+            )
+            if not approval.approved:
+                await self.log("WARNING", f"HITL blocked order: {approval.reason}")
+                self.trace.record(
+                    {
+                        "trace_id": data.get("trace_id"),
+                        "symbol": signal.symbol,
+                        "stage": "executor_hitl_reject",
+                        "risk_decision": approval.reason,
+                        "side": signal.signal_type.value,
+                        "qty": signal.amount,
+                    }
+                )
+                return
             
             await self.log(
                 "INFO",
@@ -96,7 +126,15 @@ class ExecutorAgent(BaseAgent):
             )
             
             # 执行交易
-            await self._execute_signal(signal, current_price, is_risk_close)
+            await self._execute_signal(signal, current_price, is_risk_close, trace_id=trace_id)
+            self.health.mark_progress()
+            self.checkpoint.save(
+                {
+                    "last_signal": signal.to_dict(),
+                    "last_price": current_price,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            )
             
         except Exception as e:
             await self.log("ERROR", f"执行交易失败: {e}")
@@ -107,7 +145,8 @@ class ExecutorAgent(BaseAgent):
         self,
         signal: Signal,
         current_price: float,
-        is_risk_close: bool = False
+        is_risk_close: bool = False,
+        trace_id: Optional[str] = None,
     ):
         """
         执行交易信号 (V4 - 支持止盈止损挂单)
@@ -127,27 +166,27 @@ class ExecutorAgent(BaseAgent):
             # ==== 处理平仓信号 ====
             if signal.signal_type in [SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT]:
                 if position:
-                    await self._close_position(position, signal.reason)
+                    await self._close_position(position, signal.reason, trace_id=trace_id)
                 return
             
             # ==== 处理开仓信号 ====
             if signal.signal_type == SignalType.BUY:
                 # 如果有空仓，先平掉
                 if position and position.side == 'short':
-                    await self._close_position(position, "反向开仓，先平空")
+                    await self._close_position(position, "反向开仓，先平空", trace_id=trace_id)
                     await asyncio.sleep(1)
                 
                 # 开多仓
-                await self._open_long(symbol, amount, signal)
+                await self._open_long(symbol, amount, signal, trace_id=trace_id)
                 
             elif signal.signal_type == SignalType.SELL:
                 # 如果有多仓，先平掉
                 if position and position.side == 'long':
-                    await self._close_position(position, "反向开仓，先平多")
+                    await self._close_position(position, "反向开仓，先平多", trace_id=trace_id)
                     await asyncio.sleep(1)
                 
                 # 开空仓
-                await self._open_short(symbol, amount, signal)
+                await self._open_short(symbol, amount, signal, trace_id=trace_id)
             
             elif signal.signal_type == SignalType.HOLD:
                 # HOLD 信号可能包含调整止盈止损的请求
@@ -204,10 +243,11 @@ class ExecutorAgent(BaseAgent):
         
         return None
 
-    async def _open_long(self, symbol: str, amount: float, signal: Signal):
+    async def _open_long(self, symbol: str, amount: float, signal: Signal, trace_id: Optional[str] = None):
         """开多仓 + 挂止盈止损单"""
         await self.log("INFO", f"开多仓: {amount} {symbol}")
         
+        requested_price = await self._get_requested_price(symbol)
         result = await self.exchange.create_market_order(
             symbol=symbol,
             side='buy',
@@ -273,11 +313,30 @@ class ExecutorAgent(BaseAgent):
                 'signal': signal.to_dict()
             }
         )
+        self.trace.record(
+            {
+                "trace_id": trace_id,
+                "symbol": symbol,
+                "stage": "order_filled",
+                "side": "buy",
+                "qty": actual_filled,
+                "entry_price": actual_price,
+                "llm_response": str(signal.to_dict()),
+                **self._build_execution_metadata(
+                    symbol=symbol,
+                    requested_price=requested_price,
+                    filled_price=actual_price,
+                    side="buy",
+                    order_result=result,
+                ),
+            }
+        )
     
-    async def _open_short(self, symbol: str, amount: float, signal: Signal):
+    async def _open_short(self, symbol: str, amount: float, signal: Signal, trace_id: Optional[str] = None):
         """开空仓 + 挂止盈止损单"""
         await self.log("INFO", f"开空仓: {amount} {symbol}")
         
+        requested_price = await self._get_requested_price(symbol)
         result = await self.exchange.create_market_order(
             symbol=symbol,
             side='sell',
@@ -341,6 +400,24 @@ class ExecutorAgent(BaseAgent):
             {
                 'order': result.to_dict(),
                 'signal': signal.to_dict()
+            }
+        )
+        self.trace.record(
+            {
+                "trace_id": trace_id,
+                "symbol": symbol,
+                "stage": "order_filled",
+                "side": "sell",
+                "qty": actual_filled,
+                "entry_price": actual_price,
+                "llm_response": str(signal.to_dict()),
+                **self._build_execution_metadata(
+                    symbol=symbol,
+                    requested_price=requested_price,
+                    filled_price=actual_price,
+                    side="sell",
+                    order_result=result,
+                ),
             }
         )
     
@@ -485,7 +562,7 @@ class ExecutorAgent(BaseAgent):
             entry_price=position.entry_price
         )
 
-    async def _close_position(self, position, reason: str):
+    async def _close_position(self, position, reason: str, trace_id: Optional[str] = None):
         """平仓 + 取消止盈止损单"""
         await self.log("INFO", f"平仓: {position.side} {position.size} {position.symbol}")
         
@@ -506,6 +583,7 @@ class ExecutorAgent(BaseAgent):
         # 2. 市价平仓
         side = 'sell' if position.side == 'long' else 'buy'
         
+        requested_price = await self._get_requested_price(symbol)
         result = await self.exchange.create_market_order(
             symbol=symbol,
             side=side,
@@ -551,6 +629,68 @@ class ExecutorAgent(BaseAgent):
                 'reason': reason
             }
         )
+        self.trace.record(
+            {
+                "trace_id": trace_id,
+                "symbol": symbol,
+                "stage": "position_closed",
+                "exit_price": result.price,
+                "pnl": pnl,
+                "side": f"close_{position.side}",
+                "qty": position.size,
+                "entry_price": position.entry_price,
+                **self._build_execution_metadata(
+                    symbol=symbol,
+                    requested_price=requested_price,
+                    filled_price=result.price,
+                    side=side,
+                    order_result=result,
+                ),
+            }
+        )
+
+    async def _get_requested_price(self, symbol: str) -> Optional[float]:
+        """Snapshot current ticker as requested execution price."""
+        try:
+            ticker = await self.exchange.fetch_ticker(symbol)
+            requested = ticker.get("last")
+            return float(requested) if requested is not None else None
+        except Exception:
+            return None
+
+    def _build_execution_metadata(
+        self,
+        symbol: str,
+        requested_price: Optional[float],
+        filled_price: Optional[float],
+        side: str,
+        order_result: Any,
+    ) -> Dict[str, Any]:
+        """Build common execution-quality fields for trace records."""
+        slippage_bps = None
+        if requested_price and filled_price:
+            direction_sign = 1 if side == "buy" else -1
+            slippage_bps = (
+                (float(filled_price) - float(requested_price))
+                / float(requested_price)
+                * 10000
+                * direction_sign
+            )
+        partial_fill_count = 1 if getattr(order_result, "remaining", 0) > 0 else 0
+        if partial_fill_count:
+            self._pending_orders[symbol] = self._pending_orders.get(symbol, 0) + 1
+            partial_fill_count = self._pending_orders[symbol]
+        maker_or_taker = "taker"
+        fee_paid = getattr(order_result, "fee", 0.0) or 0.0
+        return {
+            "requested_price": requested_price,
+            "filled_price": filled_price,
+            "slippage_bps": slippage_bps,
+            "maker_or_taker": maker_or_taker,
+            "partial_fill_count": partial_fill_count,
+            "fee_paid": fee_paid,
+            "fee_currency": "USDT" if fee_paid else None,
+        }
     
     async def handle_message(self, message: Message):
         """处理其他消息"""

@@ -66,7 +66,8 @@ class BaseExchange(ABC):
         self, 
         symbol: str, 
         timeframe: str, 
-        limit: int = 100
+        limit: int = 100,
+        since: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """获取K线数据"""
         pass

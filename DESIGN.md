@@ -81,15 +81,15 @@ class BaseAgent:
 ```python
 class StrategyAgent:
     strategies = [
-        TrendFollowingStrategy(),    # 趋势跟踪策略
-        MeanReversionStrategy(),     # 均值回归策略
-        AIAnalysisStrategy(),        # DeepSeek AI分析
-        TechnicalIndicatorStrategy() # 技术指标策略
+        AIScalpingStrategy(),         # AI剥头皮策略
+        AIHybridStrategy(),           # AI混合策略
+        TechnicalIndicatorStrategy(), # 技术指标策略
+        TrendFollowingStrategy(),     # 趋势跟踪策略
     ]
     
-    # 策略投票机制
+    # 支持 single(单策略) 和 voting(投票) 两种模式
     def aggregate_signals(signals: List[Signal]) -> FinalSignal:
-        # 加权投票，综合多个策略意见
+        # voting模式下加权投票，综合多个策略意见
         pass
 ```
 
@@ -117,7 +117,7 @@ class TechnicalIndicators:
 ### 3.3 信号融合
 
 ```
-AI信号(40%) + 技术指标(30%) + 趋势分析(20%) + 市场情绪(10%)
+AI信号(40%) + 技术指标(30%) + 趋势分析(30%)
     ↓
   加权融合
     ↓
@@ -132,11 +132,12 @@ AI信号(40%) + 技术指标(30%) + 趋势分析(20%) + 市场情绪(10%)
 
 | 规则 | 描述 | 默认值 |
 |------|------|--------|
-| 最大持仓比例 | 单币种最大持仓占总资金比例 | 20% |
+| 最大持仓比例 | 单币种最大持仓占总资金比例 | 30% |
 | 单笔止损 | 单笔交易最大亏损 | 2% |
 | 日止损 | 单日最大亏损 | 5% |
 | 最大杠杆 | 允许的最大杠杆倍数 | 10x |
-| 连续亏损暂停 | 连续N次亏损后暂停交易 | 3次 |
+| 连续亏损暂停 | 连续N次亏损后暂停交易 | 5次 |
+| 每日最大交易 | 单日最大交易次数 | 50次 |
 
 ### 4.2 动态止盈止损
 
@@ -154,9 +155,9 @@ class DynamicStopLoss:
 ### 5.1 技术选型
 
 - **后端**: FastAPI (Python异步框架)
-- **前端**: Vue 3 + Tailwind CSS
+- **前端**: 原生 HTML + Tailwind CSS (CDN)
 - **实时通信**: WebSocket
-- **图表**: ECharts / Chart.js
+- **图表**: Canvas API (内联绘制)
 
 ### 5.2 Dashboard 功能
 
@@ -207,7 +208,11 @@ crypto_agent/
 │   ├── base_agent.py         # Agent基类
 │   ├── orchestrator.py       # 协调器
 │   ├── state_store.py        # 状态存储
-│   └── message.py            # 消息定义
+│   ├── message.py            # 消息定义
+│   └── state/                # 拆分状态组件
+│       ├── market_state.py   # 行情状态
+│       ├── position_state.py # 持仓状态 (SQLite)
+│       └── stats.py          # 统计状态
 ├── agents/
 │   ├── __init__.py
 │   ├── market_agent.py       # 行情Agent
@@ -217,32 +222,54 @@ crypto_agent/
 │   └── logger_agent.py       # 日志Agent
 ├── strategies/
 │   ├── __init__.py
-│   ├── base_strategy.py      # 策略基类
-│   ├── ai_strategy.py        # AI分析策略
-│   ├── technical_strategy.py # 技术指标策略
-│   └── trend_strategy.py     # 趋势跟踪策略
+│   ├── base_strategy.py          # 策略基类
+│   ├── ai_strategy.py            # AI分析策略
+│   ├── ai_scalping_strategy.py   # AI剥头皮策略
+│   ├── ai_hybrid_strategy.py     # AI混合策略 V3
+│   ├── ai_hybrid_v4_strategy.py  # AI混合策略 V4
+│   ├── ai_trend_sniper_strategy.py # AI趋势狙击策略
+│   ├── technical_strategy.py     # 技术指标策略
+│   └── trend_strategy.py         # 趋势跟踪策略
 ├── exchange/
 │   ├── __init__.py
 │   ├── base_exchange.py      # 交易所基类
-│   └── okx_exchange.py       # OKX实现
+│   ├── okx_exchange.py       # OKX实现
+│   └── okx_client_pool.py    # OKX客户端池
 ├── indicators/
 │   ├── __init__.py
 │   └── technical.py          # 技术指标计算
+├── harness/                         # Harness V2 运行时护栏
+│   ├── verification/                # 信号校验 (schema/sanity/policy_gate)
+│   ├── cost/                        # LLM 预算管理 & 降级
+│   ├── context/                     # K线摘要、regime 标签、prompt 构建
+│   ├── observability/               # 全链路 trace (SQLite+FTS5) & 评估
+│   ├── hitl/                        # 人工审批门 (Telegram 桩)
+│   └── lifecycle/                   # 健康监控 & checkpoint
+├── evolution/                       # 自演进引擎
+│   ├── postmortem.py                # 复盘草案
+│   ├── skill_health.py              # 技能健康度
+│   ├── skill_lifecycle.py           # 技能生命周期
+│   ├── walk_forward.py              # 前向验证
+│   └── judge.py                     # LLM-as-judge
+├── memory/                          # 记忆与技能
+│   ├── MEMORY.md                    # 市场经验
+│   ├── USER.md                      # 用户偏好
+│   ├── memory_tool.py               # 记忆读写
+│   ├── skill_manage.py              # 技能管理
+│   └── skills/                      # 技能模板
 ├── risk/
 │   ├── __init__.py
-│   └── risk_manager.py       # 风控管理器
+│   └── risk_manager.py              # 兼容层 → harness/verification/policy_gate
 ├── web/
 │   ├── __init__.py
-│   ├── app.py                # FastAPI应用
-│   ├── routes.py             # API路由
-│   ├── websocket.py          # WebSocket处理
+│   ├── app.py                       # FastAPI应用 (含路由和WebSocket)
 │   └── static/
-│       └── index.html        # 前端页面
+│       └── index.html               # 前端页面
 ├── utils/
 │   ├── __init__.py
-│   ├── logger.py             # 日志工具
-│   └── helpers.py            # 辅助函数
-└── main.py                   # 主入口
+│   ├── logger.py                    # 日志工具
+│   └── helpers.py                   # 辅助函数
+└── main.py                          # 主入口
 ```
 
 ---
@@ -256,7 +283,7 @@ crypto_agent/
 | 交易所SDK | ccxt | 统一交易接口 |
 | AI | DeepSeek API | 市场分析 |
 | Web框架 | FastAPI | 高性能API |
-| 前端 | Vue 3 + Tailwind | 现代UI |
+| 前端 | 原生 HTML + Tailwind CSS (CDN) | 轻量 UI |
 | 数据分析 | pandas, numpy | 数据处理 |
 | 指标计算 | ta-lib / pandas-ta | 技术指标 |
 | 配置管理 | python-dotenv | 环境变量 |
@@ -325,5 +352,6 @@ class MyCustomAgent(BaseAgent):
 
 ---
 
-*文档版本: 1.0*  
-*创建日期: 2026-01-25*
+*文档版本: 1.1 — 补充 Harness V2 / evolution / memory / core/state 模块*  
+*创建日期: 2026-01-25*  
+*最后更新: 2026-05-06*
