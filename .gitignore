@@ -1,0 +1,106 @@
+# ============================================================
+# Crypto Agent .gitignore
+# 凡是「机器跑出来 / 各自机器不同」的产物，都不该进仓库
+# ============================================================
+
+# ---------- macOS ----------
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Python 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Python 测试 / 类型 / lint 缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ---------- IDE / 编辑器 ----------
+# .idea 内部已有自己的 .gitignore（JetBrains 自带），整体保留共享部分
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------- Node / 前端 ----------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.pnpm-store/
+.yarn/
+# Vite / TS 构建产物（web/static/ 是生产托管目录，按需保留；这里只屏蔽缓存）
+web/frontend/dist/
+web/frontend/.vite/
+web/frontend/*.tsbuildinfo
+
+# ---------- 密钥与环境变量 ----------
+.env
+.env.local
+.env.*.local
+# .env.example 必须保留作为模板，不在这里屏蔽
+
+# ---------- Crypto Agent 运行时产物 ----------
+# 主程序日志
+*.log
+crypto_agent.log
+
+# 运行时 SQLite（trace / 持仓 / 回测 cache）
+memory/trades.db
+memory/trades.db-journal
+memory/trades.db-wal
+memory/trades.db-shm
+memory/backtest_cache/
+
+# 运行时 checkpoint（每次启动会覆盖）
+memory/checkpoint.json
+
+# 回测报告（generated artifact，按 run_id 命名）
+reports/backtest_*.json
+reports/backtest_*_trades.csv
+
+# ---------- 其它 ----------
+*.bak
+*.tmp
+*.orig
