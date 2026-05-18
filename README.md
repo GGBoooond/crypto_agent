@@ -35,7 +35,10 @@ crypto_agent/
 │   ├── executor_agent.py    # 执行 Agent
 │   └── logger_agent.py      # 日志 Agent
 ├── strategies/                    # 策略模块
-│   ├── base_strategy.py          # 策略基类
+│   ├── base_strategy.py          # 传统策略基类
+│   ├── base_ai_strategy.py       # AI 策略模板基类（统一 prompt/token/验证/skill_used 写回）
+│   ├── prompt_only_ai_strategy.py # 纯 prompt 驱动策略基类（声明式 TRIGGER_RULES）
+│   ├── llm_client.py             # 通用 LLM 调用封装（OpenAI 协议兼容）
 │   ├── ai_strategy.py            # AI 分析策略
 │   ├── ai_scalping_strategy.py   # AI 剥头皮策略
 │   ├── ai_hybrid_strategy.py     # AI 混合策略 V3
@@ -46,17 +49,18 @@ crypto_agent/
 ├── harness/                  # Harness V2 运行时护栏
 │   ├── verification/        # 信号校验 (schema/sanity/policy)
 │   ├── cost/                # LLM 预算与降级
-│   ├── context/             # K线摘要、regime 标签、prompt 构建
-│   ├── observability/       # 全链路追踪 (SQLite+FTS5) 与评估
+│   ├── context/             # K线摘要、regime 标签、prompt 构建、StrategyContext 容器
+│   ├── observability/       # 全链路追踪 (SQLite+FTS5) + 评估 + forward return 回填
 │   ├── hitl/                # 人工审批门 (Telegram 桩)
 │   ├── lifecycle/           # 健康监控、checkpoint
 │   └── backtest/            # 回测引擎 MVP（CLI / 数据拉取 / 撮合 / 报告）
 ├── evolution/                # 自演进引擎
 │   ├── postmortem.py        # 复盘草案生成
 │   ├── skill_health.py      # 技能健康度统计
-│   ├── skill_lifecycle.py   # 技能生命周期管理
+│   ├── skill_lifecycle.py   # 技能生命周期管理 (QUARANTINE/ACTIVE/PATCHED/SUNSET/DISCARDED)
 │   ├── walk_forward.py      # 前向验证
-│   └── judge.py             # LLM-as-judge 评分
+│   ├── judge.py             # LLM-as-judge 评分
+│   └── attribution.py       # skill × regime 离线归因（落 reports/skill_performance.csv）
 ├── memory/                   # 记忆与技能
 │   ├── MEMORY.md            # 市场经验记忆
 │   ├── USER.md              # 用户偏好
@@ -243,11 +247,7 @@ LoggerAgent (记录日志)
 - **single**（默认）：使用单一策略，通过 `ENABLED_STRATEGIES` 指定
 - **voting**：加权投票融合多个策略
 
-| 策略 | 权重 | 说明 |
-|------|------|------|
-| AIStrategy | 40% | DeepSeek AI 分析 |
-| TechnicalStrategy | 30% | RSI, MACD, 布林带 |
-| TrendStrategy | 30% | EMA 趋势跟踪 |
+`strategies/__init__.py` 的 `DEFAULT_WEIGHTS` 给出默认权重（单策略时通常为 1.0，传统经典三件套用 0.4 / 0.3 / 0.3 的分布）。运行时可在 `STRATEGY_REGISTRY` 中注册新策略并按需覆盖权重。
 
 ### 风控规则
 
@@ -371,12 +371,25 @@ class BinanceExchange(BaseExchange):
 
 ## 📝 开发日志
 
-- v1.0.0: 初始版本
-  - 完成 Agent 框架
-  - 集成 DeepSeek AI
-  - 实现技术指标策略
-  - 添加风控系统
-  - 创建 Web 监控面板
+- **v1.0** — Agent 框架 / DeepSeek 集成 / 技术指标策略 / 基础风控 / Web 监控面板
+- **v2.0 — Harness V2 重构**（参见 `docs/HARNESS_V2_IMPLEMENTATION_GUIDE.md`）
+  - 三层信号验证（schema / sanity / policy_gate）
+  - LLM 预算管理 + 超预算自动降级
+  - Context engineering：K线摘要、regime tagger、PromptBuilder + frozen snapshot
+  - 全链路 trace（SQLite + FTS5）+ forward return 回填
+  - Memory + Skills 基础设施（含 frontmatter `metadata.quant`）
+  - HITL Telegram 审批门（桩）+ Lifecycle health/checkpoint
+- **v2.1 — 回测框架 + 策略接入 Context 层**
+  - `harness/backtest/` MVP CLI（replay / rerun）
+  - 所有 AI 策略迁移至 `BaseAIStrategy` 模板
+  - 新增 `PromptOnlyAIStrategy` 与 `prompt_only_ai_strategy.py`
+  - Backtest 可视化前端（Vue3 + Vite）+ FastAPI 后端
+- **v2.2 — LLM 决策灵活化 + Skill 演化闭环**（详见 `docs/spec/tasks.md`）
+  - `decision_schema` 四态（EXECUTE / REJECT / ADJUST / HOLD）解放 LLM 决策空间
+  - 策略侧统一写回 `skill_used`，trace `fine_regime` 列
+  - Skill 混合检索（regime + tape_signature + 触发类型）
+  - `evolution/attribution.py` 离线归因（skill × regime → `reports/skill_performance.csv`）
+  - Postmortem 落盘 + Skill lifecycle 持久化
 
 ## 📄 许可证
 
