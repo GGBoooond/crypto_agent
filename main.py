@@ -25,6 +25,7 @@ from agents.strategy_agent import StrategyAgent
 from web.app import create_app
 from utils.logger import setup_logger
 from harness.observability import ForwardReturnBackfiller
+from evolution.scheduler import EvolutionScheduler
 
 
 class CryptoAgentSystem:
@@ -79,6 +80,9 @@ class CryptoAgentSystem:
         await self.orchestrator.start()
         backfiller = ForwardReturnBackfiller()
         self._background_tasks.append(asyncio.create_task(backfiller.run_forever()))
+        if settings.evolution_scheduler_enabled:
+            scheduler = EvolutionScheduler()
+            self._background_tasks.append(asyncio.create_task(scheduler.run_forever()))
         await self._shutdown.wait()
     
     async def stop(self):
