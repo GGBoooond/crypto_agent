@@ -1,0 +1,42 @@
+[
+  {
+    "category": "market_shock",
+    "trace": {"forward_return_5m": -0.08, "forward_return_30m": -0.08}
+  },
+  {
+    "category": "slippage_excess",
+    "trace": {"forward_return_30m": -0.02, "slippage_bps": 25}
+  },
+  {
+    "category": "funding_drag",
+    "trace": {"forward_return_30m": -0.02, "funding_rate": 0.0004}
+  },
+  {
+    "category": "skill_pitfall_hit",
+    "trace": {"forward_return_30m": -0.02, "skill_used": "sample_skill"}
+  },
+  {
+    "category": "regime_misjudge",
+    "trace": {"forward_return_30m": -0.02}
+  },
+  {
+    "category": "random_noise",
+    "trace": {"forward_return_30m": 0.02}
+  },
+  {
+    "category": "market_shock",
+    "trace": {"forward_return_5m": 0.07, "forward_return_30m": 0.06}
+  },
+  {
+    "category": "skill_pitfall_hit",
+    "trace": {"pnl": -5.0, "skill_used": "[\"sample_skill\"]"}
+  },
+  {
+    "category": "slippage_excess",
+    "trace": {"pnl": -1.0, "slippage_bps": -20}
+  },
+  {
+    "category": "random_noise",
+    "trace": {"pnl": 1.0, "skill_used": "sample_skill"}
+  }
+]

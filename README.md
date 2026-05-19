@@ -55,12 +55,14 @@ crypto_agent/
 │   ├── lifecycle/           # 健康监控、checkpoint
 │   └── backtest/            # 回测引擎 MVP（CLI / 数据拉取 / 撮合 / 报告）
 ├── evolution/                # 自演进引擎
-│   ├── postmortem.py        # 复盘草案生成
+│   ├── attribution.py       # skill × regime 离线归因（14 字段 + 混淆矩阵）
+│   ├── cli.py               # evolution 命令行入口
+│   ├── scheduler.py         # 盘后归因 / 生命周期 / 复盘调度器
+│   ├── postmortem.py        # 9 类复盘归因与草案路由
 │   ├── skill_health.py      # 技能健康度统计
 │   ├── skill_lifecycle.py   # 技能生命周期管理 (QUARANTINE/ACTIVE/PATCHED/SUNSET/DISCARDED)
 │   ├── walk_forward.py      # 前向验证
-│   ├── judge.py             # LLM-as-judge 评分
-│   └── attribution.py       # skill × regime 离线归因（落 reports/skill_performance.csv）
+│   └── judge.py             # LLM-as-judge 双签评分
 ├── memory/                   # 记忆与技能
 │   ├── MEMORY.md            # 市场经验记忆
 │   ├── USER.md              # 用户偏好
@@ -110,6 +112,12 @@ OKX_PASSPHRASE=your_passphrase
 
 # DeepSeek AI
 DEEPSEEK_API_KEY=your_deepseek_api_key
+
+# Reviewer LLM / LLM-as-Judge（必须和策略 LLM 不同）
+POSTMORTEM_REVIEWER_PROVIDER=qwen
+POSTMORTEM_REVIEWER_API_KEY=your_reviewer_key
+POSTMORTEM_REVIEWER_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+POSTMORTEM_REVIEWER_MODEL=qwen-plus
 
 # 交易配置
 TRADING_SYMBOL=DOGE/USDT:USDT
@@ -168,6 +176,18 @@ python -m harness.backtest \
 - 先用 `--llm-mode replay` 做基线复盘，再切 `rerun` 观察当前模型漂移
 - 实盘前至少做 30 天窗口回测，并关注最大回撤与 profit factor
 - 首次使用请确认 `.env` 中仍为 `TEST_MODE=true`
+
+## 🧬 自演进离线任务
+
+离线归因会把 trace 聚合成 `skill_performance` 表，字段包括 `avg_fwd_5m/30m/4h`、最大回撤、简化 Sharpe、IC 与最近样本时间；混淆矩阵会写入 `skill_regime_accuracy`。
+
+```bash
+python -m evolution.cli attribution --since 2026-04-01 --window 30m
+python -m evolution.cli attribution --confusion-matrix
+python -m evolution.cli postmortem --dry-run --limit 200
+```
+
+自动调度默认关闭。要让主程序每天跑归因、生命周期和复盘，在 `.env` 里设置 `EVOLUTION_SCHEDULER_ENABLED=true`；reviewer LLM 如需真实调用，配置 `POSTMORTEM_REVIEWER_PROVIDER/API_KEY/MODEL`，且不能和策略 LLM 是同一个 provider+model。
 
 ## 🖥️ Backtest 可视化界面
 
@@ -388,8 +408,8 @@ class BinanceExchange(BaseExchange):
   - `decision_schema` 四态（EXECUTE / REJECT / ADJUST / HOLD）解放 LLM 决策空间
   - 策略侧统一写回 `skill_used`，trace `fine_regime` 列
   - Skill 混合检索（regime + tape_signature + 触发类型）
-  - `evolution/attribution.py` 离线归因（skill × regime → `reports/skill_performance.csv`）
-  - Postmortem 落盘 + Skill lifecycle 持久化
+  - `evolution/attribution.py` 离线归因（skill × regime → `skill_performance` / `skill_regime_accuracy`）
+  - Postmortem 9 类归因、双签 patch、Skill draft 与 Skill lifecycle 持久化
 
 ## 📄 许可证
 

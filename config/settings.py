@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="", alias="LLM_MODEL")
     # DeepSeek V4 系列默认开启思维链；对结构化 JSON 输出场景关闭可显著降低 token 消耗与延迟
     llm_thinking_enabled: bool = Field(default=False, alias="LLM_THINKING_ENABLED")
+    postmortem_reviewer_provider: str = Field(default="", alias="POSTMORTEM_REVIEWER_PROVIDER")
+    postmortem_reviewer_api_key: str = Field(default="", alias="POSTMORTEM_REVIEWER_API_KEY")
+    postmortem_reviewer_base_url: str = Field(default="", alias="POSTMORTEM_REVIEWER_BASE_URL")
+    postmortem_reviewer_model: str = Field(default="", alias="POSTMORTEM_REVIEWER_MODEL")
+    llm_reviewer_daily_token_limit: int = Field(default=50000, alias="LLM_REVIEWER_DAILY_TOKEN_LIMIT")
+    evolution_reviewer_degraded: bool = Field(default=True, alias="EVOLUTION_REVIEWER_DEGRADED")
     
     # ==================== 交易配置 ====================
     trading_symbol: str = Field(default="DOGE/USDT:USDT", alias="TRADING_SYMBOL")
@@ -76,6 +82,14 @@ class Settings(BaseSettings):
     reconnect_attempts: int = Field(default=5, alias="RECONNECT_ATTEMPTS")
     reconnect_delay: int = Field(default=5, alias="RECONNECT_DELAY")
     heartbeat_interval: int = Field(default=30, alias="HEARTBEAT_INTERVAL")
+    evolution_scheduler_enabled: bool = Field(default=False, alias="EVOLUTION_SCHEDULER_ENABLED")
+    evolution_attribution_hour_utc: int = Field(default=0, alias="EVOLUTION_ATTRIBUTION_HOUR_UTC")
+    evolution_attribution_minute: int = Field(default=30, alias="EVOLUTION_ATTRIBUTION_MINUTE")
+    evolution_lifecycle_hour_utc: int = Field(default=0, alias="EVOLUTION_LIFECYCLE_HOUR_UTC")
+    evolution_lifecycle_minute: int = Field(default=45, alias="EVOLUTION_LIFECYCLE_MINUTE")
+    evolution_postmortem_hour_utc: int = Field(default=1, alias="EVOLUTION_POSTMORTEM_HOUR_UTC")
+    evolution_postmortem_minute: int = Field(default=0, alias="EVOLUTION_POSTMORTEM_MINUTE")
+    lifecycle_strong_days_to_active: int = Field(default=3, alias="LIFECYCLE_STRONG_DAYS_TO_ACTIVE")
     
     class Config:
         env_file = ".env"
@@ -102,6 +116,39 @@ class Settings(BaseSettings):
 
     def get_llm_model(self) -> str:
         return self.llm_model or self.ai_model
+
+    def get_reviewer_provider(self) -> str:
+        return (self.postmortem_reviewer_provider or "").strip().lower()
+
+    def get_reviewer_api_key(self) -> str:
+        return self.postmortem_reviewer_api_key
+
+    def get_reviewer_base_url(self) -> str:
+        if self.postmortem_reviewer_base_url:
+            return self.postmortem_reviewer_base_url
+        provider = self.get_reviewer_provider()
+        if provider == "openai":
+            return "https://api.openai.com/v1"
+        if provider == "qwen":
+            return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        if provider == "glm":
+            return "https://open.bigmodel.cn/api/paas/v4"
+        return ""
+
+    def get_reviewer_model(self) -> str:
+        return self.postmortem_reviewer_model
+
+    def validate_reviewer_is_independent(self) -> None:
+        reviewer_provider = self.get_reviewer_provider()
+        reviewer_model = self.get_reviewer_model()
+        if not reviewer_provider or not reviewer_model:
+            if self.evolution_reviewer_degraded:
+                return
+            raise ValueError("POSTMORTEM_REVIEWER_PROVIDER/MODEL must be configured")
+        strategy_identity = f"{self.get_llm_provider()}:{self.get_llm_model()}"
+        reviewer_identity = f"{reviewer_provider}:{reviewer_model}"
+        if strategy_identity == reviewer_identity:
+            raise ValueError("Reviewer LLM must use a different provider/model from strategy LLM")
     
     def get_strategy_config(self, strategy_name: str) -> Dict[str, Any]:
         """获取特定策略的配置"""

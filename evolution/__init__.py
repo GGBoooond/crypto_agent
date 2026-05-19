@@ -5,6 +5,8 @@ from .skill_health import SkillHealthTracker
 from .skill_lifecycle import SkillLifecycleManager, SkillStage
 from .walk_forward import WalkForwardEngine
 from .judge import PatchJudge
+from .attribution import SkillAttributionJob
+from .scheduler import EvolutionScheduler
 
 __all__ = [
     "PostmortemEngine",
@@ -13,5 +15,7 @@ __all__ = [
     "SkillStage",
     "WalkForwardEngine",
     "PatchJudge",
+    "SkillAttributionJob",
+    "EvolutionScheduler",
 ]
 

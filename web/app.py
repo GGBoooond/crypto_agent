@@ -11,6 +11,8 @@ from core.state_store import StateStore
 from core.orchestrator import Orchestrator
 from config import settings
 from web.api.backtest import register_backtest_routes
+from evolution.skill_lifecycle import SkillLifecycleManager
+from memory.skill_manage import SkillManager
 
 
 class ConnectionManager:
@@ -168,6 +170,38 @@ def create_app(orchestrator: Optional[Orchestrator] = None) -> FastAPI:
         
         else:
             return JSONResponse({'error': f'未知操作: {action}'}, status_code=400)
+
+    @app.get("/admin/skill_drafts")
+    async def list_skill_drafts():
+        manager = SkillManager()
+        return JSONResponse({"drafts": manager.list_drafts()})
+
+    @app.post("/admin/skill_drafts/{name}/promote")
+    async def promote_skill_draft(name: str):
+        manager = SkillManager()
+        lifecycle = SkillLifecycleManager()
+        try:
+            path = manager.promote_draft(name)
+            lifecycle.ensure_skill(name)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"draft not found: {name}"}, status_code=404)
+        except FileExistsError:
+            return JSONResponse({"error": f"skill already exists: {name}"}, status_code=409)
+        return JSONResponse({"status": "promoted", "path": str(path)})
+
+    @app.post("/admin/skill_drafts/{name}/reject")
+    async def reject_skill_draft(name: str):
+        manager = SkillManager()
+        try:
+            path = manager.reject_draft(name)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"draft not found: {name}"}, status_code=404)
+        return JSONResponse({"status": "rejected", "path": str(path)})
+
+    @app.get("/admin/skill_lifecycle")
+    async def list_skill_lifecycle():
+        lifecycle = SkillLifecycleManager()
+        return JSONResponse({"skills": lifecycle.to_public_payload()})
     
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):

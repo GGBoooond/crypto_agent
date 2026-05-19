@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -12,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 _MAX_INJECTED_SKILLS = 3
 _BLOCKED_SKILL_STAGES = {"sunset", "discarded"}
+_SKILL_PERFORMANCE_CACHE_SECONDS = 60
 
 
 @dataclass
@@ -49,6 +52,8 @@ class PromptBuilder:
         self.last_regime: Optional[str] = None
         self.regime_layer: str = ""
         self.last_injected_skill_ids: List[str] = []
+        self._skill_performance_cache: Dict[Tuple[str, str], Dict[str, float]] = {}
+        self._skill_performance_cache_at: float = 0.0
 
     # ------------------------------------------------------------------
     # Static snapshot layer (MEMORY/USER/SKILLS index)
@@ -65,7 +70,14 @@ class PromptBuilder:
         skills_dir = self.memory_dir / "skills"
         if not skills_dir.exists():
             return []
-        return sorted(skills_dir.glob("*/SKILL.md"))
+        paths = []
+        for path in sorted(skills_dir.glob("*/SKILL.md")):
+            if path.parent.name in {".draft", ".archive"}:
+                continue
+            if any(part in {".draft", ".archive"} for part in path.parts):
+                continue
+            paths.append(path)
+        return paths
 
     def _current_source_signature(self) -> Tuple[Tuple[str, float], ...]:
         sources = [
@@ -285,10 +297,71 @@ class PromptBuilder:
         score = self._regime_score(skill, regime)
         score += self._trigger_score(skill, strategy_payload)
         score += self._tape_score(skill, kline_summary)
-        profit_factor = skill.get("profit_factor")
+        profit_factor = self._performance_profit_factor(skill, regime)
         if isinstance(profit_factor, (int, float)) and profit_factor > 1:
             score += min(float(profit_factor), 3.0) * 0.1
         return score
+
+    def _performance_profit_factor(self, skill: Dict[str, Any], regime: str) -> Optional[float]:
+        db_path = self.memory_dir / "trades.db"
+        performance = self._load_skill_performance_index(db_path)
+        skill_id = str(skill.get("id") or skill.get("name") or "")
+        for key in ((skill_id, regime), (skill_id, "*")):
+            item = performance.get(key)
+            if item and item.get("sample_size", 0.0) >= 5:
+                return item.get("profit_factor")
+        return skill.get("profit_factor")
+
+    def _load_skill_performance_index(
+        self,
+        db_path: Path,
+    ) -> Dict[Tuple[str, str], Dict[str, float]]:
+        now = time.monotonic()
+        if now - self._skill_performance_cache_at < _SKILL_PERFORMANCE_CACHE_SECONDS:
+            return self._skill_performance_cache
+        self._skill_performance_cache_at = now
+        if not db_path.exists():
+            self._skill_performance_cache = {}
+            return self._skill_performance_cache
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    """
+                    SELECT skill_id, regime, sample_size, profit_factor
+                    FROM skill_performance
+                    """
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error:
+            self._skill_performance_cache = {}
+            return self._skill_performance_cache
+        index: Dict[Tuple[str, str], Dict[str, float]] = {}
+        totals: Dict[str, Dict[str, float]] = {}
+        for row in rows:
+            skill_id = str(row.get("skill_id") or "")
+            regime = str(row.get("regime") or "unknown")
+            sample_size = float(row.get("sample_size") or 0.0)
+            profit_factor = float(row.get("profit_factor") or 0.0)
+            index[(skill_id, regime)] = {
+                "sample_size": sample_size,
+                "profit_factor": profit_factor,
+            }
+            bucket = totals.setdefault(
+                skill_id,
+                {"sample_size": 0.0, "weighted_pf": 0.0},
+            )
+            bucket["sample_size"] += sample_size
+            bucket["weighted_pf"] += profit_factor * sample_size
+        for skill_id, bucket in totals.items():
+            sample_size = bucket["sample_size"]
+            if sample_size > 0:
+                index[(skill_id, "*")] = {
+                    "sample_size": sample_size,
+                    "profit_factor": bucket["weighted_pf"] / sample_size,
+                }
+        self._skill_performance_cache = index
+        return self._skill_performance_cache
 
     @staticmethod
     def _regime_score(skill: Dict[str, Any], regime: str) -> float:
